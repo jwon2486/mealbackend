@@ -1310,7 +1310,10 @@ if __name__ == "__main__":
     #alter_meals_table_unique_key()
     # alter_employees_add_type()  # ✅ 여기에 추가하세요
 
-    app.run(debug=True)     # 디버그 모드 (코드 변경 시 자동 재시작)
+    port = int(os.environ.get("PORT", 5000)) #실제사용
+    app.run(host="0.0.0.0", port=port)       #실제사용
+
+    # app.run(debug=True)     # 디버그 모드 (코드 변경 시 자동 재시작)
 
 
 
