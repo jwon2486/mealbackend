@@ -395,23 +395,6 @@ def admin_edit_meals():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # for meal in meals:
-    #     user_id = meal.get("user_id")
-    #     date = meal.get("date")
-    #     breakfast = int(meal.get("breakfast", 0))
-    #     lunch = int(meal.get("lunch", 0))
-    #     dinner = int(meal.get("dinner", 0))
-
-
-
-    #     # 먼저 해당 user_id+date 조합 삭제
-    #     cursor.execute("DELETE FROM meals WHERE user_id = ? AND date = ?", (user_id, date))
-
-    #     # 이후 새로 삽입
-    #     cursor.execute("""
-    #         INSERT INTO meals (user_id, date, breakfast, lunch, dinner)
-    #         VALUES (?, ?, ?, ?, ?)
-    #     """, (user_id, date, breakfast, lunch, dinner))
 
     for meal in meals:
         user_id = meal.get("user_id")
@@ -710,58 +693,6 @@ def download_logs_excel():
     finally:
         conn.close()
 
-
-# @app.route("/stats/period_meals", methods=["GET"])
-# def get_period_meal_stats():
-#     start_str = request.args.get("start")
-#     end_str = request.args.get("end")
-
-#     try:
-#         # 기본값: 이번 달 1일부터 말일까지
-#         today = datetime.today()
-#         if not start_str or not end_str:
-#             start_date = datetime(today.year, today.month, 1).date()
-#             if today.month == 12:
-#                 end_date = datetime(today.year + 1, 1, 1).date() - timedelta(days=1)
-#             else:
-#                 end_date = datetime(today.year, today.month + 1, 1).date() - timedelta(days=1)
-#         else:
-#             start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
-#             end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
-
-#         conn = get_db_connection()
-#         cursor = conn.execute("""
-#             SELECT date, 
-#                    SUM(breakfast) AS breakfast_count,
-#                    SUM(lunch) AS lunch_count,
-#                    SUM(dinner) AS dinner_count
-#             FROM meals
-#             WHERE date BETWEEN ? AND ?
-#             GROUP BY date
-#             ORDER BY date ASC
-#         """, (start_date.isoformat(), end_date.isoformat()))
-
-#         rows = cursor.fetchall()
-#         conn.close()
-
-#         result = []
-#         for row in rows:
-#             date_obj = datetime.strptime(row["date"], "%Y-%m-%d").date()
-#             weekday = date_obj.weekday()
-#             if weekday < 5:  # 월~금만 포함
-#                 result.append({
-#                     "date": row["date"],
-#                     "weekday": ["월", "화", "수", "목", "금"][weekday],
-#                     "breakfast": row["breakfast_count"],
-#                     "lunch": row["lunch_count"],
-#                     "dinner": row["dinner_count"]
-#                 })
-
-#         return jsonify(result), 200
-
-#     except Exception as e:
-#         print("❌ 기간별 통계 조회 오류:", e)
-#         return jsonify({"error": "기간별 통계 조회 실패"}), 500
 
 @app.route("/admin/stats/period", methods=["GET"])
 def get_stats_period():
@@ -1276,13 +1207,13 @@ def weekly_dept_excel():
 
 # ✅ (선택) 기본 접속 페이지 - 브라우저에서 확인용
 @app.route("/")
-def home():
+def index():
     return "✅ Flask 백엔드 서버 정상 실행 중입니다."
 
 
 # ✅ 앱 실행 진입점 (init_db로 테이블 자동 생성 → 서버 실행)
 if __name__ == "__main__":
-    init_db()               # 앱 시작 시 DB 테이블 없으면 자동 생성
+    # init_db()               # 앱 시작 시 DB 테이블 없으면 자동 생성
     #migrate_meals_table()
     #alter_meals_table_unique_key()
     # alter_employees_add_type()  # ✅ 여기에 추가하세요
