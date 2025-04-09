@@ -937,7 +937,8 @@ def download_dept_summary_excel():
 
     # 직영/협력사 분리 및 정렬
     direct = df[df["type"] == "직영"].sort_values("dept")
-    partner = df[df["type"] != "직영"].sort_values("dept")
+    partner = df[df["type"] == "협력사"].sort_values("dept")
+    visitor = df[df["type"] == "방문자"].sort_values("dept")
 
     def make_subtotal(df_part, label):
         subtotal = pd.DataFrame({
@@ -952,9 +953,10 @@ def download_dept_summary_excel():
 
     direct_total = make_subtotal(direct, "직영")
     partner_total = make_subtotal(partner, "협력사")
+    visitor_total = make_subtotal(visitor, "방문자")
     grand_total = make_subtotal(df, "총계")
 
-    final_df = pd.concat([direct, direct_total, partner, partner_total, grand_total], ignore_index=True)
+    final_df = pd.concat([direct, direct_total, partner, partner_total, visitor, visitor_total, grand_total], ignore_index=True)
     final_df = final_df[["dept", "total", "breakfast", "lunch", "dinner"]]  # 열 순서 정리
 
     # 엑셀 바이너리로 변환
@@ -1042,6 +1044,7 @@ def weekly_dept_stats():
 
     return jsonify(result)
 
+
 @app.route("/admin/stats/weekly_dept/excel")
 def weekly_dept_excel():
     start = request.args.get("start")
@@ -1125,10 +1128,12 @@ def weekly_dept_excel():
         return rows
 
     direct = [k for k, v in dept_map.items() if v["type"] == "직영"]
-    partner = [k for k, v in dept_map.items() if v["type"] != "직영"]
+    partner = [k for k, v in dept_map.items() if v["type"] == "협력사"]
+    visitor = [k for k, v in dept_map.items() if v["type"] == "방문자"]
 
     df_direct = pd.DataFrame(build_rows(direct))
     df_partner = pd.DataFrame(build_rows(partner))
+    df_visitor = pd.DataFrame(build_rows(visitor))
 
     def subtotal(df, label):
         if df.empty:
@@ -1146,7 +1151,9 @@ def weekly_dept_excel():
         subtotal(df_direct, "직영 소계"),
         df_partner,
         subtotal(df_partner, "협력사 소계"),
-        subtotal(pd.concat([df_direct, df_partner]), "총계")
+        df_visitor,
+        subtotal(df_visitor, "방문자 소계"),
+        subtotal(pd.concat([df_direct, df_partner, df_visitor]), "총계")
     ], ignore_index=True)
 
     output = BytesIO()
@@ -1157,75 +1164,6 @@ def weekly_dept_excel():
     filename = f"weekly_dept_{start}_to_{end}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-
-# # 방문자 신청 저장 API (POST /visitors)
-# @app.route("/visitors", methods=["POST"])
-# def save_visitors():
-#     data = request.get_json()
-#     items = data.get("visitors", [])
-
-#     if not items:
-#         return jsonify({"error": "방문자 식수 정보가 없습니다."}), 400
-
-#     conn = get_db_connection()
-#     cursor = conn.cursor()
-
-#     for item in items:
-#         date = item.get("date")
-#         breakfast = int(item.get("breakfast", 0))
-#         lunch = int(item.get("lunch", 0))
-#         dinner = int(item.get("dinner", 0))
-#         applicant_name = item.get("applicant_name")
-#         applicant_id = item.get("applicant_id")
-#         reason = item.get("reason", "")
-
-#         # 유효성 체크
-#         if not (date and applicant_name and applicant_id):
-#             continue
-
-#         # 날짜별 중복 시 덮어쓰기
-#         cursor.execute("""
-#             INSERT INTO visitors (date, breakfast, lunch, dinner, applicant_name, applicant_id, reason)
-#             VALUES (?, ?, ?, ?, ?, ?, ?)
-#             ON CONFLICT(date)
-#             DO UPDATE SET
-#                 breakfast = excluded.breakfast,
-#                 lunch = excluded.lunch,
-#                 dinner = excluded.dinner,
-#                 applicant_name = excluded.applicant_name,
-#                 applicant_id = excluded.applicant_id,
-#                 reason = excluded.reason
-#                 last_modified = CURRENT_TIMESTAMP
-#         """, (date, breakfast, lunch, dinner, applicant_name, applicant_id, reason))
-
-#     conn.commit()
-#     conn.close()
-#     return jsonify({"message": "방문자 식수가 저장되었습니다."}), 201
-
-# # 2) 방문자 신청 내역 조회 API (GET /visitors)
-# @app.route("/visitors", methods=["GET"])
-# def get_visitors():
-#     start = request.args.get("start")
-#     end = request.args.get("end")
-
-#     if not start or not end:
-#         return jsonify({"error": "start, end 파라미터가 필요합니다."}), 400
-
-#     conn = get_db_connection()
-#     cursor = conn.cursor()
-#     cursor.execute("""
-#         SELECT date, breakfast, lunch, dinner,
-#                applicant_name, applicant_id, reason,
-#                last_modified
-#         FROM visitors
-#         WHERE date BETWEEN ? AND ?
-#         ORDER BY date
-#     """, (start, end))
-
-#     rows = cursor.fetchall()
-#     conn.close()
-#     return jsonify([dict(r) for r in rows])
 
 
 
