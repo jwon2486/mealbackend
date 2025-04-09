@@ -1237,12 +1237,12 @@ def index():
 
 # ✅ 앱 실행 진입점 (init_db로 테이블 자동 생성 → 서버 실행)
 if __name__ == "__main__":
-    # init_db()               # 앱 시작 시 DB 테이블 없으면 자동 생성
+    init_db()               # 앱 시작 시 DB 테이블 없으면 자동 생성
     #migrate_meals_table()
     #alter_meals_table_unique_key()
     # alter_employees_add_type()  # ✅ 여기에 추가하세요
     
-    import os
+    # import os
     port = int(os.environ.get("PORT", 5000)) #실제사용
     app.run(host="0.0.0.0", port=port)       #실제사용
 
