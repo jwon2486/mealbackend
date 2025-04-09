@@ -396,6 +396,7 @@ def admin_edit_meals():
     cursor = conn.cursor()
 
 
+
     for meal in meals:
         user_id = meal.get("user_id")
         date_str = meal.get("date")
@@ -591,7 +592,30 @@ def download_employee_template():
 def login_check():
     emp_id = request.args.get("id")
     name = request.args.get("name")
-    return jsonify({ "valid": True if name == "강상윤" else False })
+
+    print(f"🔍 로그인 시도: 사번={emp_id}, 이름={name}")  # ✅ 추가
+
+    if not emp_id or not name:
+        return jsonify({"error": "사번과 이름을 모두 입력하세요"}), 400
+
+    conn = get_db_connection()
+    cursor = conn.execute(
+        "SELECT id, name, dept, rank FROM employees WHERE id = ? AND name = ?",
+        (emp_id, name)
+    )
+    user = cursor.fetchone()
+    conn.close()
+
+    if user:
+        return jsonify({
+            "valid": True,
+            "id": user["id"],
+            "name": user["name"],
+            "dept": user["dept"],
+            "rank": user["rank"]
+        })
+    else:
+        return jsonify({"valid": False}), 401
 
 
 @app.route("/admin/logs", methods=["GET"])
