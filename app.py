@@ -1165,6 +1165,10 @@ def weekly_dept_excel():
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+# ✅ 최소 응답을 위한 ping 엔드포인트
+@app.route("/ping")
+def ping():
+    return "pong", 200
 
 
 # ✅ (선택) 기본 접속 페이지 - 브라우저에서 확인용
