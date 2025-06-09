@@ -2369,6 +2369,11 @@ def download_db():
     from flask import send_file
     return send_file('db.sqlite', as_attachment=True)
 
+# 주기적 ping 발송응답
+@app.route('/health')
+def health_check():
+    return 'OK', 200
+
 
 
 
