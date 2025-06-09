@@ -2363,6 +2363,12 @@ def ping():
 def home():
     return "✅ Flask 백엔드 서버 정상 실행 중입니다."
 
+# DB 다운로드
+@app.route('/download_db')
+def download_db():
+    from flask import send_file
+    return send_file('db.sqlite', as_attachment=True)
+
 
 
 
