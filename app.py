@@ -12,9 +12,6 @@ from flask_cors import CORS
 from datetime import datetime, timedelta
 from collections import defaultdict
 from io import BytesIO
-from openpyxl import Workbook
-from openpyxl.styles import Border, Side
-from io import BytesIO
 import sqlite3
 import pandas as pd
 import os
@@ -675,7 +672,7 @@ def login_check():
     conn = get_db_connection()
 
     cursor = conn.execute(
-        "SELECT id, name, dept, rank, type FROM employees WHERE id = ? AND name = ?",
+        "SELECT id, name, dept, rank, type, level FROM employees WHERE id = ? AND name = ?",
         (emp_id, name)
     )
     user = cursor.fetchone()
@@ -689,7 +686,7 @@ def login_check():
             "dept": user["dept"],
             "rank": user["rank"],
             "type": user["type"] or "직영", # ✅ 여기서 type 추가 (직영 / 협력사 / 방문자)
-            'level': row['level']   
+            "level": user["level"] or "1",
         })
     else:
         return jsonify({"valid": False}), 401
@@ -1003,59 +1000,74 @@ def download_stats_period_excel():
     rows = cursor.fetchall()
     conn.close()
 
+    # ✅ 데이터 프레임 구성
+    records = []
+    weekly_groups = {}
+    monthly_total = {"breakfast": 0, "lunch": 0, "dinner": 0}
+
     def get_week_key(date_str):
         d = datetime.strptime(date_str, "%Y-%m-%d")
         week_num = d.isocalendar()[1]
         return f"{d.year}-{week_num:02d}주차"
 
-    # 그룹화 및 총계 계산
-    weekly_groups = {}
-    monthly_total = {"breakfast": 0, "lunch": 0, "dinner": 0}
     for row in rows:
         date_str = row["date"]
         b, l, dnr = row["breakfast"], row["lunch"], row["dinner"]
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        weekday = ["월", "화", "수", "목", "금", "토", "일"][dt.weekday()]
         week_key = get_week_key(date_str)
+
+        monthly_total["breakfast"] += b
+        monthly_total["lunch"] += l
+        monthly_total["dinner"] += dnr
 
         if week_key not in weekly_groups:
             weekly_groups[week_key] = []
 
         weekly_groups[week_key].append({
             "날짜": date_str,
-            "요일": ["월", "화", "수", "목", "금", "토", "일"][datetime.strptime(date_str, "%Y-%m-%d").weekday()],
+            "요일": weekday,
             "조식": b,
             "중식": l,
             "석식": dnr
         })
 
-        monthly_total["breakfast"] += b
-        monthly_total["lunch"] += l
-        monthly_total["dinner"] += dnr
+    # ✅ 엑셀 구성
+    import pandas as pd
+    from io import BytesIO
 
-    # 엑셀 작성
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "기간별 식수통계"
-    ws.append(["날짜", "요일", "조식", "중식", "석식"])
-
-    thin = Side(style="thin")
-    thick = Side(style="thick")
-    
-    for week_rows in weekly_groups.values():
-        for row in week_rows:
-            ws.append([row["날짜"], row["요일"], row["조식"], row["중식"], row["석식"]])
-        # 직전 행에 아래쪽 굵은 테두리 삽입
-        last_row = ws.max_row
-        for cell in ws[last_row]:
-            cell.border = Border(bottom=thick)
-
-    # 총계 행 추가
-    ws.append(["기간별 총계", "", monthly_total["breakfast"], monthly_total["lunch"], monthly_total["dinner"]])
-
-    # 파일 저장
     output = BytesIO()
-    wb.save(output)
-    output.seek(0)
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        all_data = []
 
+        for week, rows in weekly_groups.items():
+            df = pd.DataFrame(rows)
+            all_data.append(df)
+
+            # ✅ 주간 소계
+            subtotal = {
+                "날짜": f"{week} 소계",
+                "요일": "",
+                "조식": sum(r["조식"] for r in rows),
+                "중식": sum(r["중식"] for r in rows),
+                "석식": sum(r["석식"] for r in rows)
+            }
+            all_data.append(pd.DataFrame([subtotal]))
+
+        # ✅ 총계 추가
+        total_row = {
+            "날짜": "기간별 총계",
+            "요일": "",
+            "조식": monthly_total["breakfast"],
+            "중식": monthly_total["lunch"],
+            "석식": monthly_total["dinner"]
+        }
+        all_data.append(pd.DataFrame([total_row]))
+
+        final_df = pd.concat(all_data, ignore_index=True)
+        final_df.to_excel(writer, index=False, sheet_name="기간별 식수통계")
+
+    output.seek(0)
     filename = f"meal_stats_period_{start}_to_{end}.xlsx"
     return send_file(
         output,
@@ -1879,13 +1891,7 @@ def weekly_dept_stats():
 #                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 @app.route("/admin/stats/weekly_dept/excel")
-def weekly_dept_excel():
-
-
-    def extract_quantity(name_str):
-        match = re.search(r"\((\d+)\)", name_str)
-        return int(match.group(1)) if match else 1
-
+def weekly_dept_excel_pivot():
     start = request.args.get("start")
     end = request.args.get("end")
 
@@ -1895,25 +1901,12 @@ def weekly_dept_excel():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # ✅ 전체 사원 정보
+    # 직원 정보
     cursor.execute("SELECT id, name, dept, type FROM employees")
     employees = cursor.fetchall()
     emp_info = {e["id"]: dict(e) for e in employees}
 
-    # ✅ 부서+타입 조합 확보 → 직영/협력사/방문자 포함
-    dept_map = {}
-    for e in employees:
-        key = (e["dept"], e["type"])
-        if key not in dept_map:
-            dept_map[key] = {
-                "type": e["type"],
-                "dept": f"{e['dept'][:2]}(방문자)" if e["type"] == "방문자" else e["dept"],
-                "total": 0,
-                "days": defaultdict(lambda: {"b": [], "l": [], "d": []})
-            }
-        dept_map[key]["total"] += 1
-
-    # ✅ 식수 신청 데이터 (meals + visitors)
+    # 식사 신청 + 내방객 신청 통합 조회
     cursor.execute("""
         SELECT m.date, m.user_id, m.breakfast, m.lunch, m.dinner,
                e.name, e.dept,
@@ -1932,87 +1925,50 @@ def weekly_dept_excel():
     rows = cursor.fetchall()
     conn.close()
 
+    # 1인 1식 1행 구조 생성
+    import re
+    def extract_name(name):
+        match = re.match(r"(.+?)\(\d+\)", name)
+        return match.group(1) if match else name
+
+    records = []
     for row in rows:
         date = row["date"]
-        name = row["name"]
+        name = extract_name(row["name"])
         dept = row["dept"]
         utype = row["type"]
-        key = (dept, utype)
-        label = f"{name}({row['breakfast']})" if utype in ("협력사", "방문자") and row["breakfast"] else name
 
-        if key not in dept_map:
-            dept_map[key] = {
-                "type": utype,
-                "dept": f"{dept[:2]}(방문자)" if utype == "방문자" else dept,
-                "total": 0,
-                "days": defaultdict(lambda: {"b": [], "l": [], "d": []})
-            }
+        for meal_key, meal_label in zip(["breakfast", "lunch", "dinner"], ["조식", "중식", "석식"]):
+            if row[meal_key] > 0:
+                records.append({
+                    "구분": utype,
+                    "식사일자": date,
+                    "이름": name,
+                    "부서": dept,
+                    "식사구분": meal_label
+                })
 
-        for meal, short in zip(["breakfast", "lunch", "dinner"], ["b", "l", "d"]):
-            qty = row[meal]
-            if qty > 0:
-                label = f"{name}({qty})" if utype in ("협력사", "방문자") else name
-                dept_map[key]["days"][date][short].append(label)
+    # DataFrame 생성 및 정렬
+    import pandas as pd
+    from io import BytesIO
+    df = pd.DataFrame(records)
+    df = df.sort_values(["식사일자", "구분", "부서", "이름", "식사구분"])
 
-    # ✅ 날짜 목록
-    all_dates = sorted({r["date"] for r in rows})
-
-    # ✅ 테이블 구성
-    def build_rows(filtered_keys):
-        rows = []
-        for key in sorted(filtered_keys, key=lambda k: dept_map[k]["dept"]):
-            data = dept_map[key]
-            row = {
-                "부서": data["dept"],
-                "인원수": data["total"]
-            }
-            for d in all_dates:
-                for k, label in zip(["b", "l", "d"], ["조식", "중식", "석식"]):
-                    names = data["days"][d][k]
-                    qty = sum(extract_quantity(n) for n in names)
-                    row[f"{d}_{label}인원"] = qty
-                    row[f"{d}_{label}명단"] = ", ".join(names) if names else "-"
-            rows.append(row)
-        return rows
-
-    # ✅ 분류
-    direct_keys = [k for k in dept_map if k[1] == "직영"]
-    partner_keys = [k for k in dept_map if k[1] == "협력사"]
-    visitor_keys = [k for k in dept_map if k[1] == "방문자"]
-
-    df_direct = pd.DataFrame(build_rows(direct_keys))
-    df_partner = pd.DataFrame(build_rows(partner_keys))
-    df_visitor = pd.DataFrame(build_rows(visitor_keys))
-
-    def subtotal(df, label):
-        if df.empty: return pd.DataFrame()
-        row = {"부서": label, "인원수": df["인원수"].sum()}
-        for col in df.columns:
-            if "인원" in col and col != "인원수":
-                row[col] = df[col].sum()
-            elif "명단" in col:
-                row[col] = ""
-        return pd.DataFrame([row])
-
-    df_all = pd.concat([
-        df_direct,
-        subtotal(df_direct, "직영 소계"),
-        df_partner,
-        subtotal(df_partner, "협력사 소계"),
-        df_visitor,
-        subtotal(df_visitor, "방문자 소계"),
-        subtotal(pd.concat([df_direct, df_partner, df_visitor]), "총계")
-    ], ignore_index=True)
-
-    # ✅ Excel 출력
+    # Excel 파일로 출력
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df_all.to_excel(writer, index=False, sheet_name="주간 부서별 신청현황")
-    output.seek(0)
+        df.to_excel(writer, index=False, sheet_name="피벗 데이터")
 
-    filename = f"weekly_dept_{start}_to_{end}.xlsx"
-    return send_file(output, as_attachment=True, download_name=filename,
-                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    output.seek(0)
+    from flask import send_file
+    filename = f"weekly_dept_pivot_{start}_to_{end}.xlsx"
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
 
 
 
@@ -2350,6 +2306,17 @@ def ping():
 @app.route("/")
 def home():
     return "✅ Flask 백엔드 서버 정상 실행 중입니다."
+
+# DB 다운로드
+@app.route('/download_db')
+def download_db():
+    from flask import send_file
+    return send_file('db.sqlite', as_attachment=True)
+
+# 주기적 ping 발송응답
+@app.route('/health')
+def health_check():
+    return 'OK', 200
 
 
 
