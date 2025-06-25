@@ -697,7 +697,7 @@ def login_check():
             "dept": user["dept"],
             "rank": user["rank"],
             "type": user["type"], # ✅ 여기서 type 추가 (직영 / 협력사 / 방문자)
-             "level": user["level"]  # ✅ level 포함!
+             "level": user["level"]  # ✅ level 포함
             
         })
     else:
