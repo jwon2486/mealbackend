@@ -1012,7 +1012,7 @@ def download_stats_period_excel():
     rows = cursor.fetchall()
     conn.close()
 
-    # ✅ 데이터 구성
+    # ✅ 데이터 프레임 구성
     records = []
     weekly_groups = {}
     monthly_total = {"breakfast": 0, "lunch": 0, "dinner": 0}
@@ -1023,13 +1023,8 @@ def download_stats_period_excel():
         return f"{d.year}-{week_num:02d}주차"
 
     for row in rows:
-        b, l, dnr = row["breakfast"], row["lunch"], row["dinner"]
-
-        # ✅ 모두 0인 경우 제외
-        if b == 0 and l == 0 and dnr == 0:
-            continue
-
         date_str = row["date"]
+        b, l, dnr = row["breakfast"], row["lunch"], row["dinner"]
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         weekday = ["월", "화", "수", "목", "금", "토", "일"][dt.weekday()]
         week_key = get_week_key(date_str)
@@ -1056,14 +1051,20 @@ def download_stats_period_excel():
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         all_data = []
-        week_end_rows = []
-        current_index = 0
 
         for week, rows in weekly_groups.items():
             df = pd.DataFrame(rows)
             all_data.append(df)
-            current_index += len(df)
-            week_end_rows.append(current_index - 1)  # 주별 마지막 인덱스
+
+            # ✅ 주간 소계
+            subtotal = {
+                "날짜": f"{week} 소계",
+                "요일": "",
+                "조식": sum(r["조식"] for r in rows),
+                "중식": sum(r["중식"] for r in rows),
+                "석식": sum(r["석식"] for r in rows)
+            }
+            all_data.append(pd.DataFrame([subtotal]))
 
         # ✅ 총계 추가
         total_row = {
@@ -1078,23 +1079,14 @@ def download_stats_period_excel():
         final_df = pd.concat(all_data, ignore_index=True)
         final_df.to_excel(writer, index=False, sheet_name="기간별 식수통계")
 
-        # ✅ 굵은 아래 테두리 적용
-        workbook = writer.book
-        worksheet = writer.sheets["기간별 식수통계"]
-        border_format = workbook.add_format({'bottom': 2})
-
-        for row_idx in week_end_rows:
-            worksheet.set_row(row_idx + 1, None, border_format)  # +1은 헤더 보정용
-
-        output.seek(0)
-        filename = f"meal_stats_period_{start}_to_{end}.xlsx"
-        return send_file(
+    output.seek(0)
+    filename = f"meal_stats_period_{start}_to_{end}.xlsx"
+    return send_file(
         output,
         as_attachment=True,
         download_name=filename,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
 
 
 # ✅ 날짜별 그래프 데이터를 변환하는 함수
