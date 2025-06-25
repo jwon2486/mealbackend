@@ -1888,138 +1888,61 @@ def weekly_dept_stats():
 #                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 @app.route("/admin/stats/weekly_dept/excel")
-def weekly_dept_excel():
-
-
-    def extract_quantity(name_str):
-        match = re.search(r"\((\d+)\)", name_str)
-        return int(match.group(1)) if match else 1
-
+def download_weekly_raw_excel():
     start = request.args.get("start")
     end = request.args.get("end")
-
     if not start or not end:
-        return "start 또는 end 파라미터가 누락되었습니다.", 400
+        return "날짜를 지정해주세요", 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # ✅ 전체 사원 정보
-    cursor.execute("SELECT id, name, dept, type FROM employees")
-    employees = cursor.fetchall()
-    emp_info = {e["id"]: dict(e) for e in employees}
-
-    # ✅ 부서+타입 조합 확보 → 직영/협력사/방문자 포함
-    dept_map = {}
-    for e in employees:
-        key = (e["dept"], e["type"])
-        if key not in dept_map:
-            dept_map[key] = {
-                "type": e["type"],
-                "dept": f"{e['dept'][:2]}(방문자)" if e["type"] == "방문자" else e["dept"],
-                "total": 0,
-                "days": defaultdict(lambda: {"b": [], "l": [], "d": []})
-            }
-        dept_map[key]["total"] += 1
-
-    # ✅ 식수 신청 데이터 (meals + visitors)
+    # 1. 직원 식사 데이터 (meals 테이블)
     cursor.execute("""
-        SELECT m.date, m.user_id, m.breakfast, m.lunch, m.dinner,
-               e.name, e.dept,
-               CASE 
-                    WHEN m.source = 'visitors' THEN m.vtype
-                    ELSE e.type
-               END AS type
-        FROM (
-            SELECT 'meals' AS source, user_id, date, breakfast, lunch, dinner, NULL AS vtype FROM meals
-            UNION ALL
-            SELECT 'visitors' AS source, applicant_id AS user_id, date, breakfast, lunch, dinner, type AS vtype FROM visitors
-        ) m
+        SELECT m.date, e.type, e.name, e.dept,
+               m.breakfast, m.lunch, m.dinner
+        FROM meals m
         JOIN employees e ON m.user_id = e.id
         WHERE m.date BETWEEN ? AND ?
     """, (start, end))
-    rows = cursor.fetchall()
+    meal_rows = cursor.fetchall()
+
+    # 2. 방문자/협력사 식사 데이터 (visitors 테이블)
+    cursor.execute("""
+        SELECT v.date, v.type, v.applicant_name AS name, e.dept,
+               v.breakfast, v.lunch, v.dinner
+        FROM visitors v
+        LEFT JOIN employees e ON v.applicant_id = e.id
+        WHERE v.date BETWEEN ? AND ?
+    """, (start, end))
+    visitor_rows = cursor.fetchall()
+
     conn.close()
 
-    for row in rows:
-        date = row["date"]
-        name = row["name"]
-        dept = row["dept"]
-        utype = row["type"]
-        key = (dept, utype)
-        label = f"{name}({row['breakfast']})" if utype in ("협력사", "방문자") and row["breakfast"] else name
+    # 3. 결과를 낱개 식사 기준으로 풀어냄
+    records = []
+    for row in meal_rows + visitor_rows:
+        for meal_type, label in zip(["breakfast", "lunch", "dinner"], ["조식", "중식", "석식"]):
+            if row[meal_type]:  # 1이면 기록 추가
+                records.append({
+                    "구분": row["type"],
+                    "식사일자": row["date"],
+                    "이름": row["name"],
+                    "부서": row["dept"] if row["dept"] else "",
+                    "식사구분": label
+                })
 
-        if key not in dept_map:
-            dept_map[key] = {
-                "type": utype,
-                "dept": f"{dept[:2]}(방문자)" if utype == "방문자" else dept,
-                "total": 0,
-                "days": defaultdict(lambda: {"b": [], "l": [], "d": []})
-            }
+    # 4. DataFrame 변환
+    df = pd.DataFrame(records)
+    df = df.sort_values(by=["식사일자", "부서", "이름", "식사구분"])
 
-        for meal, short in zip(["breakfast", "lunch", "dinner"], ["b", "l", "d"]):
-            qty = row[meal]
-            if qty > 0:
-                label = f"{name}({qty})" if utype in ("협력사", "방문자") else name
-                dept_map[key]["days"][date][short].append(label)
-
-    # ✅ 날짜 목록
-    all_dates = sorted({r["date"] for r in rows})
-
-    # ✅ 테이블 구성
-    def build_rows(filtered_keys):
-        rows = []
-        for key in sorted(filtered_keys, key=lambda k: dept_map[k]["dept"]):
-            data = dept_map[key]
-            row = {
-                "부서": data["dept"],
-                "인원수": data["total"]
-            }
-            for d in all_dates:
-                for k, label in zip(["b", "l", "d"], ["조식", "중식", "석식"]):
-                    names = data["days"][d][k]
-                    qty = sum(extract_quantity(n) for n in names)
-                    row[f"{d}_{label}인원"] = qty
-                    row[f"{d}_{label}명단"] = ", ".join(names) if names else "-"
-            rows.append(row)
-        return rows
-
-    # ✅ 분류
-    direct_keys = [k for k in dept_map if k[1] == "직영"]
-    partner_keys = [k for k in dept_map if k[1] == "협력사"]
-    visitor_keys = [k for k in dept_map if k[1] == "방문자"]
-
-    df_direct = pd.DataFrame(build_rows(direct_keys))
-    df_partner = pd.DataFrame(build_rows(partner_keys))
-    df_visitor = pd.DataFrame(build_rows(visitor_keys))
-
-    def subtotal(df, label):
-        if df.empty: return pd.DataFrame()
-        row = {"부서": label, "인원수": df["인원수"].sum()}
-        for col in df.columns:
-            if "인원" in col and col != "인원수":
-                row[col] = df[col].sum()
-            elif "명단" in col:
-                row[col] = ""
-        return pd.DataFrame([row])
-
-    df_all = pd.concat([
-        df_direct,
-        subtotal(df_direct, "직영 소계"),
-        df_partner,
-        subtotal(df_partner, "협력사 소계"),
-        df_visitor,
-        subtotal(df_visitor, "방문자 소계"),
-        subtotal(pd.concat([df_direct, df_partner, df_visitor]), "총계")
-    ], ignore_index=True)
-
-    # ✅ Excel 출력
+    # 5. Excel 생성
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df_all.to_excel(writer, index=False, sheet_name="주간 부서별 신청현황")
-    output.seek(0)
+        df.to_excel(writer, index=False, sheet_name="신청자별 식사기록")
 
-    filename = f"weekly_dept_{start}_to_{end}.xlsx"
+    output.seek(0)
+    filename = f"신청자별_주간식사기록_{start}_to_{end}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
