@@ -866,125 +866,7 @@ def get_visitor_logs():
     finally:
         conn.close()
 
-@app.route("/admin/visitor_logs/download", methods=["GET"])
-def download_visitor_logs_excel():
-    start = request.args.get("start")
-    end = request.args.get("end")
-    name = request.args.get("name", "")
-    dept = request.args.get("dept", "")
-    vtype = request.args.get("type", "")
-
-    if not start or not end:
-        return "기간을 지정해주세요", 400
-
-    conn = get_db_connection()
-    try:
-        cursor = conn.cursor()
-
-        query = """
-            SELECT l.date, e.dept, l.applicant_name,
-                   l.before_breakfast, l.before_lunch, l.before_dinner,
-                   l.breakfast, l.lunch, l.dinner, l.updated_at
-            FROM visitor_logs l
-            LEFT JOIN employees e ON l.applicant_id = e.id
-            WHERE l.date BETWEEN ? AND ?
-              AND l.applicant_name LIKE ?
-              AND IFNULL(e.dept, '') LIKE ?
-        """
-        params = [start, end, f"%{name}%", f"%{dept}%"]
-
-        if vtype:
-            query += " AND l.type = ?"
-            params.append(vtype)
-
-        query += """
-            ORDER BY 
-                l.date ASC,
-                e.dept ASC,
-                l.applicant_name ASC,
-                l.updated_at DESC
-        """
-
-        cursor.execute(query, params)
-        logs = [dict(row) for row in cursor.fetchall()]
-        df = pd.DataFrame(logs)
-
-        if df.empty:
-            return "엑셀로 출력할 데이터가 없습니다.", 404
-
-        # ✅ 포맷 구성
-        df["식수일"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d (%a)")
-        df["부서"] = df["dept"]
-        df["이름"] = df["applicant_name"]
-        df["변경전"] = df.apply(
-            lambda row: f"조식({row['before_breakfast']}), 중식({row['before_lunch']}), 석식({row['before_dinner']})", axis=1)
-        df["변경후"] = df.apply(
-            lambda row: f"조식({row['breakfast']}), 중식({row['lunch']}), 석식({row['dinner']})", axis=1)
-        df["변경시각"] = df["updated_at"]
-
-        final_df = df[["식수일", "부서", "이름", "변경전", "변경후", "변경시각"]]
-
-        # ✅ Excel 생성
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            final_df.to_excel(writer, index=False, sheet_name="방문자 식수 로그")
-
-        output.seek(0)
-        filename = f"visitor_logs_{start}_to_{end}.xlsx"
-        return send_file(output,
-                         as_attachment=True,
-                         download_name=filename,
-                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    except Exception as e:
-        print("❌ 방문자 엑셀 오류:", e)
-        return jsonify({"error": "엑셀 다운로드 실패"}), 500
-    finally:
-        conn.close()
-
-@app.route("/admin/stats/period", methods=["GET"])
-def get_stats_period():
-    start = request.args.get("start")
-    end = request.args.get("end")
-
-    if not start or not end:
-        return jsonify({"error": "기간이 지정되지 않았습니다."}), 400
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT date, 
-               SUM(breakfast) as breakfast, 
-                SUM(lunch) as lunch, 
-                SUM(dinner) as dinner
-        FROM (
-            SELECT date, breakfast, lunch, dinner FROM meals
-            UNION ALL
-            SELECT date, breakfast, lunch, dinner FROM visitors
-        )
-        WHERE date BETWEEN ? AND ?
-        GROUP BY date
-        ORDER BY date
-    """, (start, end))
-
-    rows = cursor.fetchall()
-    conn.close()
-
-    stats = []
-    for row in rows:
-        weekday = datetime.strptime(row["date"], "%Y-%m-%d").weekday()
-        weekday_kr = ["월", "화", "수", "목", "금", "토", "일"][weekday]
-        stats.append({
-            "date": row["date"],
-            "day": weekday_kr,   # ✅ 추가
-            "breakfast": row["breakfast"],
-            "lunch": row["lunch"],
-            "dinner": row["dinner"]
-        })
-
-    return jsonify(stats), 200
-
-@app.route("/admin/stats/period/excel", methods=["GET"])
+@app.route("/admin/stats/period/excel", methods=["GET"])  # ✅ 이미 존재함!
 def download_stats_period_excel():
     start = request.args.get("start")
     end = request.args.get("end")
@@ -992,7 +874,7 @@ def download_stats_period_excel():
     if not start or not end:
         return jsonify({"error": "기간이 지정되지 않았습니다."}), 400
 
-    conn = get_db_connection()
+    conn = get_db_connection()  # ✅ 이미 존재함!
     cursor = conn.cursor()
     cursor.execute("""
         SELECT date, 
@@ -1012,31 +894,30 @@ def download_stats_period_excel():
     rows = cursor.fetchall()
     conn.close()
 
-    # ✅ 데이터 프레임 구성
     records = []
-    weekly_groups = {}
-    monthly_total = {"breakfast": 0, "lunch": 0, "dinner": 0}
+    monthly_total = {"조식": 0, "중식": 0, "석식": 0}
+    week_last_row_indices = []
+    previous_week = None
 
     def get_week_key(date_str):
         d = datetime.strptime(date_str, "%Y-%m-%d")
-        week_num = d.isocalendar()[1]
-        return f"{d.year}-{week_num:02d}주차"
+        return f"{d.year}-{d.isocalendar()[1]:02d}"
 
     for row in rows:
-        date_str = row["date"]
         b, l, dnr = row["breakfast"], row["lunch"], row["dinner"]
+        if b == 0 and l == 0 and dnr == 0:
+            continue  # ✅ 모든 식사가 0이면 제외
+
+        date_str = row["date"]
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         weekday = ["월", "화", "수", "목", "금", "토", "일"][dt.weekday()]
-        week_key = get_week_key(date_str)
+        current_week = get_week_key(date_str)
 
-        monthly_total["breakfast"] += b
-        monthly_total["lunch"] += l
-        monthly_total["dinner"] += dnr
+        if previous_week and current_week != previous_week:
+            week_last_row_indices.append(len(records) - 1)
+        previous_week = current_week
 
-        if week_key not in weekly_groups:
-            weekly_groups[week_key] = []
-
-        weekly_groups[week_key].append({
+        records.append({
             "날짜": date_str,
             "요일": weekday,
             "조식": b,
@@ -1044,40 +925,35 @@ def download_stats_period_excel():
             "석식": dnr
         })
 
-    # ✅ 엑셀 구성
-    import pandas as pd
-    from io import BytesIO
+        monthly_total["조식"] += b
+        monthly_total["중식"] += l
+        monthly_total["석식"] += dnr
+
+    if previous_week and records:
+        week_last_row_indices.append(len(records) - 1)
+
+    # ✅ 기간별 총계 행 추가
+    records.append({
+        "날짜": "기간별 총계",
+        "요일": "",
+        "조식": monthly_total["조식"],
+        "중식": monthly_total["중식"],
+        "석식": monthly_total["석식"]
+    })
+
+    df = pd.DataFrame(records)
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        all_data = []
+        df.to_excel(writer, index=False, sheet_name="기간별 식수통계")
+        workbook = writer.book
+        worksheet = writer.sheets["기간별 식수통계"]
 
-        for week, rows in weekly_groups.items():
-            df = pd.DataFrame(rows)
-            all_data.append(df)
+        # ✅ 굵은 아래 테두리 스타일 정의
+        border_bottom_format = workbook.add_format({'bottom': 2})
 
-            # ✅ 주간 소계
-            subtotal = {
-                "날짜": f"{week} 소계",
-                "요일": "",
-                "조식": sum(r["조식"] for r in rows),
-                "중식": sum(r["중식"] for r in rows),
-                "석식": sum(r["석식"] for r in rows)
-            }
-            all_data.append(pd.DataFrame([subtotal]))
-
-        # ✅ 총계 추가
-        total_row = {
-            "날짜": "기간별 총계",
-            "요일": "",
-            "조식": monthly_total["breakfast"],
-            "중식": monthly_total["lunch"],
-            "석식": monthly_total["dinner"]
-        }
-        all_data.append(pd.DataFrame([total_row]))
-
-        final_df = pd.concat(all_data, ignore_index=True)
-        final_df.to_excel(writer, index=False, sheet_name="기간별 식수통계")
+        for idx in week_last_row_indices:
+            worksheet.set_row(idx + 1, None, border_bottom_format)  # 헤더 offset 고려
 
     output.seek(0)
     filename = f"meal_stats_period_{start}_to_{end}.xlsx"
