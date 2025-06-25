@@ -1055,9 +1055,7 @@ def download_stats_period_excel():
         border_fmt = wb.add_format({'bottom': 2})
 
         for r in row_ends:
-            for c in range(5):  # A(0) ~ E(4)
-                value = final_df.iat[r - 1, c]
-                ws.write(r, c, value, border_format)
+            ws.set_row(r, None, border_fmt)  # ← 값은 건드리지 않고 스타일만 적용
 
         # 총계 행을 직접 수동 작성
         last_row = len(final_df) + 1
