@@ -11,6 +11,7 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from datetime import datetime, timedelta
 from collections import defaultdict
+from flask import send_file
 from io import BytesIO
 import sqlite3
 import pandas as pd
@@ -143,6 +144,14 @@ def is_this_week(date_str):
     except:
         return False
 
+# 현재 서버에 반영된 최신DB를 받을수있게하는 API
+@app.route('/admin/db/download', methods=['GET'])
+def download_database():
+    db_path = os.path.join(os.getcwd(), 'db.sqlite')
+    if os.path.exists(db_path):
+        return send_file(db_path, as_attachment=True)
+    else:
+        return "DB 파일이 존재하지 않습니다.", 404
 
 # ✅ [GET] /holidays?year=YYYY
 # 특정 연도의 공휴일 리스트를 조회하는 API
@@ -672,7 +681,7 @@ def login_check():
     conn = get_db_connection()
 
     cursor = conn.execute(
-        "SELECT id, name, dept, rank, type, level FROM employees WHERE id = ? AND name = ?",
+        "SELECT id, name, dept, rank, type FROM employees WHERE id = ? AND name = ?",
         (emp_id, name)
     )
     user = cursor.fetchone()
@@ -685,8 +694,7 @@ def login_check():
             "name": user["name"],
             "dept": user["dept"],
             "rank": user["rank"],
-            "type": user["type"] or "직영", # ✅ 여기서 type 추가 (직영 / 협력사 / 방문자)
-            "level": user["level"] or "1",
+             "type": user["type"] or "직영" # ✅ 여기서 type 추가 (직영 / 협력사 / 방문자)
         })
     else:
         return jsonify({"valid": False}), 401
@@ -1891,7 +1899,13 @@ def weekly_dept_stats():
 #                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 @app.route("/admin/stats/weekly_dept/excel")
-def weekly_dept_excel_pivot():
+def weekly_dept_excel():
+
+
+    def extract_quantity(name_str):
+        match = re.search(r"\((\d+)\)", name_str)
+        return int(match.group(1)) if match else 1
+
     start = request.args.get("start")
     end = request.args.get("end")
 
@@ -1901,12 +1915,25 @@ def weekly_dept_excel_pivot():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # 직원 정보
+    # ✅ 전체 사원 정보
     cursor.execute("SELECT id, name, dept, type FROM employees")
     employees = cursor.fetchall()
     emp_info = {e["id"]: dict(e) for e in employees}
 
-    # 식사 신청 + 내방객 신청 통합 조회
+    # ✅ 부서+타입 조합 확보 → 직영/협력사/방문자 포함
+    dept_map = {}
+    for e in employees:
+        key = (e["dept"], e["type"])
+        if key not in dept_map:
+            dept_map[key] = {
+                "type": e["type"],
+                "dept": f"{e['dept'][:2]}(방문자)" if e["type"] == "방문자" else e["dept"],
+                "total": 0,
+                "days": defaultdict(lambda: {"b": [], "l": [], "d": []})
+            }
+        dept_map[key]["total"] += 1
+
+    # ✅ 식수 신청 데이터 (meals + visitors)
     cursor.execute("""
         SELECT m.date, m.user_id, m.breakfast, m.lunch, m.dinner,
                e.name, e.dept,
@@ -1925,50 +1952,87 @@ def weekly_dept_excel_pivot():
     rows = cursor.fetchall()
     conn.close()
 
-    # 1인 1식 1행 구조 생성
-    import re
-    def extract_name(name):
-        match = re.match(r"(.+?)\(\d+\)", name)
-        return match.group(1) if match else name
-
-    records = []
     for row in rows:
         date = row["date"]
-        name = extract_name(row["name"])
+        name = row["name"]
         dept = row["dept"]
         utype = row["type"]
+        key = (dept, utype)
+        label = f"{name}({row['breakfast']})" if utype in ("협력사", "방문자") and row["breakfast"] else name
 
-        for meal_key, meal_label in zip(["breakfast", "lunch", "dinner"], ["조식", "중식", "석식"]):
-            if row[meal_key] > 0:
-                records.append({
-                    "구분": utype,
-                    "식사일자": date,
-                    "이름": name,
-                    "부서": dept,
-                    "식사구분": meal_label
-                })
+        if key not in dept_map:
+            dept_map[key] = {
+                "type": utype,
+                "dept": f"{dept[:2]}(방문자)" if utype == "방문자" else dept,
+                "total": 0,
+                "days": defaultdict(lambda: {"b": [], "l": [], "d": []})
+            }
 
-    # DataFrame 생성 및 정렬
-    import pandas as pd
-    from io import BytesIO
-    df = pd.DataFrame(records)
-    df = df.sort_values(["식사일자", "구분", "부서", "이름", "식사구분"])
+        for meal, short in zip(["breakfast", "lunch", "dinner"], ["b", "l", "d"]):
+            qty = row[meal]
+            if qty > 0:
+                label = f"{name}({qty})" if utype in ("협력사", "방문자") else name
+                dept_map[key]["days"][date][short].append(label)
 
-    # Excel 파일로 출력
+    # ✅ 날짜 목록
+    all_dates = sorted({r["date"] for r in rows})
+
+    # ✅ 테이블 구성
+    def build_rows(filtered_keys):
+        rows = []
+        for key in sorted(filtered_keys, key=lambda k: dept_map[k]["dept"]):
+            data = dept_map[key]
+            row = {
+                "부서": data["dept"],
+                "인원수": data["total"]
+            }
+            for d in all_dates:
+                for k, label in zip(["b", "l", "d"], ["조식", "중식", "석식"]):
+                    names = data["days"][d][k]
+                    qty = sum(extract_quantity(n) for n in names)
+                    row[f"{d}_{label}인원"] = qty
+                    row[f"{d}_{label}명단"] = ", ".join(names) if names else "-"
+            rows.append(row)
+        return rows
+
+    # ✅ 분류
+    direct_keys = [k for k in dept_map if k[1] == "직영"]
+    partner_keys = [k for k in dept_map if k[1] == "협력사"]
+    visitor_keys = [k for k in dept_map if k[1] == "방문자"]
+
+    df_direct = pd.DataFrame(build_rows(direct_keys))
+    df_partner = pd.DataFrame(build_rows(partner_keys))
+    df_visitor = pd.DataFrame(build_rows(visitor_keys))
+
+    def subtotal(df, label):
+        if df.empty: return pd.DataFrame()
+        row = {"부서": label, "인원수": df["인원수"].sum()}
+        for col in df.columns:
+            if "인원" in col and col != "인원수":
+                row[col] = df[col].sum()
+            elif "명단" in col:
+                row[col] = ""
+        return pd.DataFrame([row])
+
+    df_all = pd.concat([
+        df_direct,
+        subtotal(df_direct, "직영 소계"),
+        df_partner,
+        subtotal(df_partner, "협력사 소계"),
+        df_visitor,
+        subtotal(df_visitor, "방문자 소계"),
+        subtotal(pd.concat([df_direct, df_partner, df_visitor]), "총계")
+    ], ignore_index=True)
+
+    # ✅ Excel 출력
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="피벗 데이터")
-
+        df_all.to_excel(writer, index=False, sheet_name="주간 부서별 신청현황")
     output.seek(0)
-    from flask import send_file
-    filename = f"weekly_dept_pivot_{start}_to_{end}.xlsx"
-    return send_file(
-        output,
-        as_attachment=True,
-        download_name=filename,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
 
+    filename = f"weekly_dept_{start}_to_{end}.xlsx"
+    return send_file(output, as_attachment=True, download_name=filename,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 
@@ -2306,17 +2370,6 @@ def ping():
 @app.route("/")
 def home():
     return "✅ Flask 백엔드 서버 정상 실행 중입니다."
-
-# DB 다운로드
-@app.route('/download_db')
-def download_db():
-    from flask import send_file
-    return send_file('db.sqlite', as_attachment=True)
-
-# 주기적 ping 발송응답
-@app.route('/health')
-def health_check():
-    return 'OK', 200
 
 
 
