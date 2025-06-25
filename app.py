@@ -1068,7 +1068,7 @@ def download_stats_period_excel():
 
         # 총계 행 바로 아래에 붙여 넣기 (빈 줄 없음)
         total_df = pd.DataFrame([{
-            "날짜": "기간별 총계",
+            "날짜": "기간별 총계", "요일": "",
             "조식": month_total["breakfast"],
             "중식": month_total["lunch"],
             "석식": month_total["dinner"]
