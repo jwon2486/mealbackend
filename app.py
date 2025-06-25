@@ -988,16 +988,17 @@ def get_stats_period():
 def download_stats_period_excel():
     start = request.args.get("start")
     end = request.args.get("end")
-    if not (start and end):
+
+    if not start or not end:
         return jsonify({"error": "기간이 지정되지 않았습니다."}), 400
 
     conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT date,
-               SUM(breakfast) AS breakfast,
-               SUM(lunch)     AS lunch,
-               SUM(dinner)    AS dinner
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT date, 
+               SUM(breakfast) as breakfast, 
+               SUM(lunch) as lunch, 
+               SUM(dinner) as dinner
         FROM (
             SELECT date, breakfast, lunch, dinner FROM meals
             UNION ALL
@@ -1007,55 +1008,90 @@ def download_stats_period_excel():
         GROUP BY date
         ORDER BY date
     """, (start, end))
-    rows = cur.fetchall()
+
+    rows = cursor.fetchall()
     conn.close()
 
-    # ── 주차별 그룹 및 0 인원 날짜 제거 ──────────────────────────────
-    def week_key(d):                                   # ISO-week key
-        dt = datetime.strptime(d, "%Y-%m-%d")
-        return f"{dt.year}-{dt.isocalendar()[1]:02d}주차"
-
-    weekly = {}
-    month_total = {"breakfast": 0, "lunch": 0, "dinner": 0}
-
-    for r in rows:
-        b, l, d = r["breakfast"], r["lunch"], r["dinner"]
-        if b == 0 and l == 0 and d == 0:          # 0 인원 날짜 제외
-            continue
-        wkey = week_key(r["date"])
-        dt   = datetime.strptime(r["date"], "%Y-%m-%d")
-        weekday_kr = "월화수목금토일"[dt.weekday()]
-        weekly.setdefault(wkey, []).append({
-            "날짜": r["date"], "요일": weekday_kr,
-            "조식": b, "중식": l, "석식": d
-        })
-        month_total["breakfast"] += b
-        month_total["lunch"]     += l
-        month_total["dinner"]    += d
-
-    # ── DataFrame 결합 ─────────────────────────────────────────────
-    import pandas as pd
     from io import BytesIO
+    import pandas as pd
+
+    weekly_groups = {}
+    monthly_total = {"breakfast": 0, "lunch": 0, "dinner": 0}
+
+    def get_week_key(date_str):
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        week_num = d.isocalendar()[1]
+        return f"{d.year}-{week_num:02d}주차"
+
+    for row in rows:
+        date_str = row["date"]
+        b, l, dnr = row["breakfast"], row["lunch"], row["dinner"]
+
+        if b == 0 and l == 0 and dnr == 0:
+            continue
+
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        weekday = ["월", "화", "수", "목", "금", "토", "일"][dt.weekday()]
+        week_key = get_week_key(date_str)
+
+        monthly_total["breakfast"] += b
+        monthly_total["lunch"] += l
+        monthly_total["dinner"] += dnr
+
+        if week_key not in weekly_groups:
+            weekly_groups[week_key] = []
+
+        weekly_groups[week_key].append({
+            "날짜": date_str,
+            "요일": weekday,
+            "조식": b,
+            "중식": l,
+            "석식": dnr
+        })
+
     output = BytesIO()
-
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        dfs, row_ends, cursor = [], [], 0
-        for rows in weekly.values():               # 주차 순서대로
+        all_data = []
+        week_row_ends = []
+        current_row = 0
+
+        for rows in weekly_groups.values():
             df = pd.DataFrame(rows)
-            dfs.append(df)
-            cursor += len(df)
-            row_ends.append(cursor - 1)            # 마지막 행 index 저장
+            all_data.append(df)
+            current_row += len(df)
+            week_row_ends.append(current_row - 1)  # 0-based index
 
-        final_df = pd.concat(dfs, ignore_index=True)
-        sheet_name = "기간별 식수통계"
-        final_df.to_excel(writer, index=False, sheet_name=sheet_name, startrow=0)
+        final_df = pd.concat(all_data, ignore_index=True)
+        final_df.to_excel(writer, index=False, sheet_name="기간별 식수통계", startrow=0)
 
-        wb  = writer.book
-        ws  = writer.sheets[sheet_name]
-        fmt = wb.add_format({'bottom': 2})         # 굵은 하단 테두리
+        # 스타일 적용
+        workbook = writer.book
+        worksheet = writer.sheets["기간별 식수통계"]
+        border_format = workbook.add_format({'bottom': 2})
 
-        # ── 주차 경계 행에 굵은 테두리 적용(5 열만)
+        for row_idx in week_row_ends:
+            worksheet.set_row(row_idx + 1, None, border_format)
 
+        # 총계 행 추가
+        total_row = {
+            "날짜": "기간별 총계",
+            "요일": "",
+            "조식": monthly_total["breakfast"],
+            "중식": monthly_total["lunch"],
+            "석식": monthly_total["dinner"]
+        }
+        df_total = pd.DataFrame([total_row])
+        df_total.to_excel(writer, index=False, sheet_name="기간별 식수통계",
+                          startrow=len(final_df) + len(week_row_ends), header=False)
+
+    output.seek(0)
+    filename = f"meal_stats_period_{start}_to_{end}.xlsx"
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 
 
