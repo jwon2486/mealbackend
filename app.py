@@ -9,6 +9,7 @@ print("✅ 현재 실행 중인 Python:", sys.executable)
 
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from collections import defaultdict
 from flask import send_file
@@ -988,7 +989,6 @@ def get_stats_period():
 def download_stats_period_excel():
     start = request.args.get("start")
     end = request.args.get("end")
-
     if not start or not end:
         return jsonify({"error": "기간이 지정되지 않았습니다."}), 400
 
@@ -1011,26 +1011,20 @@ def download_stats_period_excel():
     rows = cur.fetchall()
     conn.close()
 
-    from datetime import datetime
-    from io import BytesIO
-    import pandas as pd
-
     def week_key(date_str):
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         return f"{dt.year}-{dt.isocalendar().week:02d}주차"
 
-    weekly = {}
+    weekly = OrderedDict()
     month_total = {"breakfast": 0, "lunch": 0, "dinner": 0}
-
     for r in rows:
         b, l, d = r["breakfast"], r["lunch"], r["dinner"]
         if b == 0 and l == 0 and d == 0:
-            continue  # 0인 날짜 제외
+            continue
 
         dt = datetime.strptime(r["date"], "%Y-%m-%d")
         weekday_kr = "월화수목금토일"[dt.weekday()]
         key = week_key(r["date"])
-
         weekly.setdefault(key, []).append({
             "날짜": r["date"], "요일": weekday_kr,
             "조식": b, "중식": l, "석식": d
@@ -1050,7 +1044,7 @@ def download_stats_period_excel():
             df = pd.DataFrame(rows)
             dfs.append(df)
             current += len(df)
-            row_ends.append(current - 1)
+            row_ends.append(current)  # ← 주의: set_row는 r+1행을 지정
 
         final_df = pd.concat(dfs, ignore_index=True)
         sheet = "기간별 식수통계"
@@ -1058,23 +1052,16 @@ def download_stats_period_excel():
 
         wb = writer.book
         ws = writer.sheets[sheet]
-        fmt = wb.add_format({'bottom': 2})
+        border_fmt = wb.add_format({'bottom': 2})
 
-        num_cols = final_df.shape[1]
         for r in row_ends:
-            for c in range(num_cols):
-                val = final_df.iat[r, c]
-                ws.write(r + 1, c, val, fmt)
+            ws.set_row(r, None, border_fmt)  # ← 값은 건드리지 않고 스타일만 적용
 
-        # 총계 행 바로 아래에 붙여 넣기 (빈 줄 없음)
-        total_df = pd.DataFrame([{
-            "날짜": "기간별 총계", "요일": "",
-            "조식": month_total["breakfast"],
-            "중식": month_total["lunch"],
-            "석식": month_total["dinner"]
-        }])
-        total_df.to_excel(writer, sheet_name=sheet, index=False, header=False,
-                          startrow=len(final_df))
+        # 총계 행을 직접 수동 작성
+        last_row = len(final_df) + 1
+        total_data = ["기간별 총계", "", month_total["breakfast"], month_total["lunch"], month_total["dinner"]]
+        for col, val in enumerate(total_data):
+            ws.write(last_row, col, val)
 
     output.seek(0)
     filename = f"meal_stats_period_{start}_to_{end}.xlsx"
