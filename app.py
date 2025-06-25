@@ -1025,6 +1025,11 @@ def download_stats_period_excel():
     for row in rows:
         date_str = row["date"]
         b, l, dnr = row["breakfast"], row["lunch"], row["dinner"]
+
+        # ✅ 모든 식사 수가 0이면 제외
+        if b == 0 and l == 0 and dnr == 0:
+            continue
+
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         weekday = ["월", "화", "수", "목", "금", "토", "일"][dt.weekday()]
         week_key = get_week_key(date_str)
@@ -1087,6 +1092,7 @@ def download_stats_period_excel():
         download_name=filename,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 
 
 # ✅ 날짜별 그래프 데이터를 변환하는 함수
