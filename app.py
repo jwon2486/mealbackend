@@ -696,7 +696,8 @@ def login_check():
             "name": user["name"],
             "dept": user["dept"],
             "rank": user["rank"],
-             "type": user["type"] or "직영" # ✅ 여기서 type 추가 (직영 / 협력사 / 방문자)
+             "type": user["type"] or "직영", # ✅ 여기서 type 추가 (직영 / 협력사 / 방문자)
+             "level": user["level"] or "1",
         })
     else:
         return jsonify({"valid": False}), 401
