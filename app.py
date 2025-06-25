@@ -1020,7 +1020,7 @@ def download_stats_period_excel():
     def get_week_key(date_str):
         d = datetime.strptime(date_str, "%Y-%m-%d")
         week_num = d.isocalendar()[1]
-        return f"{d.year}-{week_num:02d}주차"
+        return f"{d.year}-{week_num:02d}"
 
     for row in rows:
         date_str = row["date"]
@@ -1047,24 +1047,28 @@ def download_stats_period_excel():
     # ✅ 엑셀 구성
     import pandas as pd
     from io import BytesIO
+    from flask import send_file
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         all_data = []
+        subtotal_indices = []  # 소계행 위치 기억
 
         for week, rows in weekly_groups.items():
             df = pd.DataFrame(rows)
             all_data.append(df)
 
-            # ✅ 주간 소계
             subtotal = {
-                "날짜": f"{week} 소계",
+                "날짜": "",  # 주차 텍스트 제거
                 "요일": "",
                 "조식": sum(r["조식"] for r in rows),
                 "중식": sum(r["중식"] for r in rows),
                 "석식": sum(r["석식"] for r in rows)
             }
-            all_data.append(pd.DataFrame([subtotal]))
+
+            subtotal_df = pd.DataFrame([subtotal])
+            subtotal_indices.append(len(pd.concat(all_data, ignore_index=True)))  # 위치 기록
+            all_data.append(subtotal_df)
 
         # ✅ 총계 추가
         total_row = {
@@ -1079,6 +1083,14 @@ def download_stats_period_excel():
         final_df = pd.concat(all_data, ignore_index=True)
         final_df.to_excel(writer, index=False, sheet_name="기간별 식수통계")
 
+        # ✅ 굵은 테두리 스타일 적용
+        workbook = writer.book
+        worksheet = writer.sheets["기간별 식수통계"]
+        border_format = workbook.add_format({'border': 2})
+
+        for idx in subtotal_indices:
+            worksheet.set_row(idx + 1, None, border_format)  # +1 for header row offset
+
     output.seek(0)
     filename = f"meal_stats_period_{start}_to_{end}.xlsx"
     return send_file(
@@ -1087,6 +1099,7 @@ def download_stats_period_excel():
         download_name=filename,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 
 
 # ✅ 날짜별 그래프 데이터를 변환하는 함수
