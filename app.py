@@ -1897,54 +1897,64 @@ def download_weekly_raw_excel():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # 1. 직원 식사 데이터 (meals 테이블)
-    cursor.execute("""
-        SELECT m.date, e.type, e.name, e.dept,
-               m.breakfast, m.lunch, m.dinner
-        FROM meals m
-        JOIN employees e ON m.user_id = e.id
-        WHERE m.date BETWEEN ? AND ?
-    """, (start, end))
-    meal_rows = cursor.fetchall()
+    try:
+        # meals 테이블
+        cursor.execute("""
+            SELECT m.date, e.type, e.name, e.dept,
+                   m.breakfast, m.lunch, m.dinner
+            FROM meals m
+            JOIN employees e ON m.user_id = e.id
+            WHERE m.date BETWEEN ? AND ?
+        """, (start, end))
+        meal_rows = cursor.fetchall()
 
-    # 2. 방문자/협력사 식사 데이터 (visitors 테이블)
-    cursor.execute("""
-        SELECT v.date, v.type, v.applicant_name AS name, e.dept,
-               v.breakfast, v.lunch, v.dinner
-        FROM visitors v
-        LEFT JOIN employees e ON v.applicant_id = e.id
-        WHERE v.date BETWEEN ? AND ?
-    """, (start, end))
-    visitor_rows = cursor.fetchall()
+        # visitors 테이블
+        cursor.execute("""
+            SELECT v.date, v.type, v.applicant_name AS name, e.dept,
+                   v.breakfast, v.lunch, v.dinner
+            FROM visitors v
+            LEFT JOIN employees e ON v.applicant_id = e.id
+            WHERE v.date BETWEEN ? AND ?
+        """, (start, end))
+        visitor_rows = cursor.fetchall()
 
-    conn.close()
+        records = []
 
-    # 3. 결과를 낱개 식사 기준으로 풀어냄
-    records = []
-    for row in meal_rows + visitor_rows:
-        for meal_type, label in zip(["breakfast", "lunch", "dinner"], ["조식", "중식", "석식"]):
-            if row[meal_type]:  # 1이면 기록 추가
-                records.append({
-                    "구분": row["type"],
-                    "식사일자": row["date"],
-                    "이름": row["name"],
-                    "부서": row["dept"] if row["dept"] else "",
-                    "식사구분": label
-                })
+        for row in meal_rows + visitor_rows:
+            date = row["date"]
+            type_ = row["type"]
+            name = row["name"]
+            dept = row["dept"] if "dept" in row.keys() and row["dept"] else ""
+            # 조식, 중식, 석식 확인
+            for meal_key, meal_name in [("breakfast", "조식"), ("lunch", "중식"), ("dinner", "석식")]:
+                if meal_key in row.keys() and row[meal_key]:
+                    records.append({
+                        "구분": type_,
+                        "식사일자": date,
+                        "이름": name,
+                        "부서": dept,
+                        "식사구분": meal_name
+                    })
 
-    # 4. DataFrame 변환
-    df = pd.DataFrame(records)
-    df = df.sort_values(by=["식사일자", "부서", "이름", "식사구분"])
+        df = pd.DataFrame(records)
+        df = df.sort_values(by=["식사일자", "부서", "이름", "식사구분"])
 
-    # 5. Excel 생성
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="신청자별 식사기록")
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="신청자별 식사기록")
 
-    output.seek(0)
-    filename = f"신청자별_주간식사기록_{start}_to_{end}.xlsx"
-    return send_file(output, as_attachment=True, download_name=filename,
-                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        output.seek(0)
+        filename = f"신청자별_주간식사기록_{start}_to_{end}.xlsx"
+        return send_file(output, as_attachment=True, download_name=filename,
+                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    except Exception as e:
+        print("❌ 엑셀 다운로드 오류:", str(e))
+        return jsonify({"error": "엑셀 다운로드 실패", "detail": str(e)}), 500
+
+    finally:
+        conn.close()
+
 
 
 
