@@ -1926,14 +1926,17 @@ def download_weekly_raw_excel():
             name = row["name"]
             dept = row["dept"] if "dept" in row.keys() and row["dept"] else ""
             # 조식, 중식, 석식 확인
-            for meal_key, meal_name in [("breakfast", "조식"), ("lunch", "중식"), ("dinner", "석식")]:
-                if meal_key in row.keys() and row[meal_key]:
+        for row in meal_rows + visitor_rows:
+                if "date" not in row.keys():
+                    print("⚠️ date 키 없음:", row)
                     records.append({
-                        "구분": type_,
-                        "식사일자": date,
-                        "이름": name,
-                        "부서": dept,
-                        "식사구분": meal_name
+                        "date": row.get("date"),
+                        "type": row.get("type"),
+                        "name": row.get("name"),
+                        "dept": row.get("dept"),
+                        "breakfast": row.get("breakfast", 0),
+                        "lunch": row.get("lunch", 0),
+                        "dinner": row.get("dinner", 0)
                     })
 
         df = pd.DataFrame(records)
