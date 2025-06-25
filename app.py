@@ -1012,9 +1012,8 @@ def download_stats_period_excel():
     rows = cursor.fetchall()
     conn.close()
 
-    from io import BytesIO
-    import pandas as pd
-
+    # ✅ 데이터 프레임 구성
+    records = []
     weekly_groups = {}
     monthly_total = {"breakfast": 0, "lunch": 0, "dinner": 0}
 
@@ -1027,6 +1026,7 @@ def download_stats_period_excel():
         date_str = row["date"]
         b, l, dnr = row["breakfast"], row["lunch"], row["dinner"]
 
+        # ✅ 모든 식사 수가 0이면 제외
         if b == 0 and l == 0 and dnr == 0:
             continue
 
@@ -1049,31 +1049,29 @@ def download_stats_period_excel():
             "석식": dnr
         })
 
+    # ✅ 엑셀 구성
+    import pandas as pd
+    from io import BytesIO
+
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         all_data = []
-        row_ends = []
 
         for week, rows in weekly_groups.items():
             df = pd.DataFrame(rows)
             all_data.append(df)
-            # row_ends 저장: 이전까지 쌓인 행 수 + 현재 df 길이 - 1
-            current_end = sum(len(d) for d in all_data) - 1
-            row_ends.append(current_end)
 
-        final_df = pd.concat(all_data, ignore_index=True)
-        final_df.to_excel(writer, index=False, sheet_name="기간별 식수통계", startrow=0)
+            # ✅ 주간 소계
+            subtotal = {
+                "날짜": f"{week} 소계",
+                "요일": "",
+                "조식": sum(r["조식"] for r in rows),
+                "중식": sum(r["중식"] for r in rows),
+                "석식": sum(r["석식"] for r in rows)
+            }
+            all_data.append(pd.DataFrame([subtotal]))
 
-        # 하단 테두리 삽입
-        workbook = writer.book
-        worksheet = writer.sheets["기간별 식수통계"]
-        border_format = workbook.add_format({'bottom': 2})  # 굵은 하단 테두리
-
-        for row_idx in row_ends:
-            for col_idx in range(5):  # 0~4열: 날짜~석식
-                worksheet.write(row_idx, col_idx, final_df.iloc[row_idx, col_idx], border_format)
-
-        # 총계 행 추가
+        # ✅ 총계 추가
         total_row = {
             "날짜": "기간별 총계",
             "요일": "",
@@ -1081,9 +1079,10 @@ def download_stats_period_excel():
             "중식": monthly_total["lunch"],
             "석식": monthly_total["dinner"]
         }
-        df_total = pd.DataFrame([total_row])
-        df_total.to_excel(writer, index=False, sheet_name="기간별 식수통계",
-                          startrow=len(final_df), header=False)
+        all_data.append(pd.DataFrame([total_row]))
+
+        final_df = pd.concat(all_data, ignore_index=True)
+        final_df.to_excel(writer, index=False, sheet_name="기간별 식수통계")
 
     output.seek(0)
     filename = f"meal_stats_period_{start}_to_{end}.xlsx"
@@ -1093,7 +1092,6 @@ def download_stats_period_excel():
         download_name=filename,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
 
 
 
