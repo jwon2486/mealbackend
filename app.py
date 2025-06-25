@@ -1044,30 +1044,32 @@ def download_stats_period_excel():
             df = pd.DataFrame(rows)
             dfs.append(df)
             current += len(df)
-            row_ends.append(current)  # ← 주의: set_row는 r+1행을 지정
+            row_ends.append(current)
 
         final_df = pd.concat(dfs, ignore_index=True)
         sheet = "기간별 식수통계"
         final_df.to_excel(writer, sheet_name=sheet, index=False, startrow=0)
 
         wb = writer.book
-        ws = writer.sheets[sheet]
-        border_fmt = wb.add_format({'bottom': 2})
+        worksheet = writer.sheets[sheet]
+        border_format = wb.add_format({'bottom': 2})
 
+        num_cols = final_df.shape[1]
         for r in row_ends:
-            ws.set_row(r, None, border_fmt)  # ← 값은 건드리지 않고 스타일만 적용
+            for c in range(num_cols):  # ← 실제 생성된 열까지 테두리 적용
+                value = final_df.iat[r - 1, c]
+                worksheet.write(r, c, value, border_format)
 
-        # 총계 행을 직접 수동 작성
+        # 총계 행 직접 작성 (요일은 공란)
         last_row = len(final_df) + 1
-        total_data = ["기간별 총계", "", month_total["breakfast"], month_total["lunch"], month_total["dinner"]]
-        for col, val in enumerate(total_data):
-            ws.write(last_row, col, val)
+        total_row = ["기간별 총계", "", month_total["breakfast"], month_total["lunch"], month_total["dinner"]]
+        for col, val in enumerate(total_row):
+            worksheet.write(last_row, col, val)
 
     output.seek(0)
     filename = f"meal_stats_period_{start}_to_{end}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
 
 
 
