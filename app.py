@@ -2023,77 +2023,51 @@ def weekly_dept_excel():
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-@app.route("/admin/stats/weekly_individual/excel")
-def weekly_individual_excel():
+@app.route("/admin/stats/pivot_excel", methods=["GET"])
+def download_pivot_style_excel():
     start = request.args.get("start")
     end = request.args.get("end")
 
     if not start or not end:
-        return "날짜 범위가 필요합니다", 400
+        return "날짜를 지정해주세요", 400
 
-    # DB 연결
-    conn = sqlite3.connect("db.sqlite")
-    conn.row_factory = sqlite3.Row
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-    # 직영 및 협력사 신청 내역
-    df_meals = pd.read_sql_query("""
-        SELECT
-            CASE
-                WHEN employee_type = '직영' THEN '직영'
-                WHEN employee_type = '협력사' THEN '협력사'
-                ELSE '기타'
-            END AS 구분,
-            meal_date AS 식사일자,
-            name AS 이름,
-            department AS 부서,
-            meal_type AS 식사구분
-        FROM meals
-        WHERE meal_date BETWEEN ? AND ?
-    """, conn, params=(start, end))
-
-    # 방문자 신청 내역
-    df_visitors = pd.read_sql_query("""
-        SELECT
-            '방문자' AS 구분,
-            visit_date AS 식사일자,
-            requester_name || '(방문자)' AS 이름,
-            department AS 부서,
-            meal_type AS 식사구분
-        FROM visitors
-        WHERE visit_date BETWEEN ? AND ?
-    """, conn, params=(start, end))
-
+    query = """
+        SELECT e.dept, e.name, m.date, m.breakfast, m.lunch, m.dinner
+        FROM meals m
+        JOIN employees e ON m.user_id = e.id
+        WHERE m.date BETWEEN ? AND ?
+        ORDER BY e.dept, e.name, m.date
+    """
+    cursor.execute(query, (start, end))
+    rows = cursor.fetchall()
     conn.close()
 
-    # 병합 및 정렬
-    df_all = pd.concat([df_meals, df_visitors], ignore_index=True)
-    df_all = df_all.sort_values(by=["식사일자", "구분", "부서", "식사구분", "이름"])
+    import pandas as pd
+    df = pd.DataFrame(rows, columns=["dept", "name", "date", "breakfast", "lunch", "dinner"])
 
-    # 엑셀 출력
+    # ✅ 피벗 테이블 구성
+    df["조식"] = df["breakfast"].apply(lambda x: "O" if x else "")
+    df["중식"] = df["lunch"].apply(lambda x: "O" if x else "")
+    df["석식"] = df["dinner"].apply(lambda x: "O" if x else "")
+    df.drop(columns=["breakfast", "lunch", "dinner"], inplace=True)
+
+    pivoted = df.pivot_table(index=["dept", "name"], columns="date", values=["조식", "중식", "석식"], aggfunc="first", fill_value="")
+    pivoted.columns = [f"{col[1]}_{col[0]}" for col in pivoted.columns]  # ex: 2025-06-24_조식
+    pivoted.reset_index(inplace=True)
+
+    from io import BytesIO
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df_all.to_excel(writer, index=False, sheet_name="주간 개인 신청내역")
-
-        worksheet = writer.sheets["주간 개인 신청내역"]
-        header_format = writer.book.add_format({
-            "bold": True,
-            "align": "center",
-            "valign": "vcenter",
-            "bg_color": "#D9D9D9",
-            "border": 1
-        })
-
-        for col_num, value in enumerate(df_all.columns.values):
-            worksheet.write(0, col_num, value, header_format)
-
-        for i, column in enumerate(df_all.columns):
-            column_width = max(df_all[column].astype(str).map(len).max(), len(column)) + 2
-            worksheet.set_column(i, i, column_width)
-
+        pivoted.to_excel(writer, index=False, sheet_name="신청현황(피벗)")
     output.seek(0)
-    filename = f"weekly_individual_{start}_to_{end}.xlsx"
+
+    filename = f"meal_pivot_{start}_to_{end}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 from flask import send_file, request
 import pandas as pd
