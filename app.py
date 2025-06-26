@@ -2029,13 +2029,13 @@ def download_weekly_individual_excel():
     end = request.args.get("end")
 
     if not (start and end):
-        return "start 또는 end 파라미터가 필요합니다.", 400
+        return "시작/종료 날짜 파라미터가 필요합니다.", 400
 
     conn = get_db_connection()
-    conn.row_factory = sqlite3.Row  # ✅ dict처럼 row["col_name"]으로 접근 가능하게 함
+    conn.row_factory = sqlite3.Row  # ✅ dict 접근을 위해 반드시 설정
     cursor = conn.cursor()
 
-    # meals 테이블
+    # 1. meals 테이블에서 신청 데이터 조회
     cursor.execute("""
         SELECT m.date, m.user_id, e.name, e.dept, e.type,
                m.breakfast, m.lunch, m.dinner
@@ -2045,7 +2045,7 @@ def download_weekly_individual_excel():
     """, (start, end))
     meal_rows = cursor.fetchall()
 
-    # visitors 테이블
+    # 2. visitors 테이블에서 신청 데이터 조회
     cursor.execute("""
         SELECT v.date, v.applicant_id, v.applicant_name, v.type,
                v.breakfast, v.lunch, v.dinner, e.dept
@@ -2058,23 +2058,41 @@ def download_weekly_individual_excel():
 
     result_rows = []
 
-    # meals → 직영/협력사
+    # 3. meals 데이터 변환 (신청된 식사만 추출)
     for row in meal_rows:
-        for meal_type, key in zip(["조식", "중식", "석식"], ["breakfast", "lunch", "dinner"]):
-            if row[key] > 0:
-                result_rows.append({
-                    "구분": row["type"],
-                    "날짜": row["date"],
-                    "이름": row["name"],
-                    "사번": row["user_id"],
-                    "부서": row["dept"],
-                    "식사구분": meal_type
-                })
+        if row["breakfast"]:
+            result_rows.append({
+                "구분": row["type"],
+                "날짜": row["date"],
+                "이름": row["name"],
+                "사번": row["user_id"],
+                "부서": row["dept"],
+                "식사구분": "조식"
+            })
+        if row["lunch"]:
+            result_rows.append({
+                "구분": row["type"],
+                "날짜": row["date"],
+                "이름": row["name"],
+                "사번": row["user_id"],
+                "부서": row["dept"],
+                "식사구분": "중식"
+            })
+        if row["dinner"]:
+            result_rows.append({
+                "구분": row["type"],
+                "날짜": row["date"],
+                "이름": row["name"],
+                "사번": row["user_id"],
+                "부서": row["dept"],
+                "식사구분": "석식"
+            })
 
-    # visitors → 방문자/협력사
+    # 4. visitors 데이터 변환 (인원 수만큼 반복 생성)
     for row in visitor_rows:
         for meal_type, key in zip(["조식", "중식", "석식"], ["breakfast", "lunch", "dinner"]):
-            for _ in range(row[key]):
+            count = row[key]
+            for _ in range(count):
                 result_rows.append({
                     "구분": row["type"],
                     "날짜": row["date"],
@@ -2084,12 +2102,13 @@ def download_weekly_individual_excel():
                     "식사구분": meal_type
                 })
 
+    # 5. 엑셀 저장
     df = pd.DataFrame(result_rows)
-    df = df[["구분", "날짜", "이름", "사번", "부서", "식사구분"]]
+    df = df[["구분", "날짜", "이름", "사번", "부서", "식사구분"]]  # 열 순서 맞춤
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="주간 신청 상세")
+        df.to_excel(writer, index=False, sheet_name="개별 신청내역")
     output.seek(0)
 
     filename = f"weekly_individual_{start}_to_{end}.xlsx"
