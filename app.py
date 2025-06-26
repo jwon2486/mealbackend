@@ -2029,42 +2029,59 @@ def download_pivot_style_excel():
     end = request.args.get("end")
 
     if not start or not end:
-        return "날짜를 지정해주세요", 400
+        return "start, end 날짜를 지정해주세요.", 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    query = """
-        SELECT e.dept, e.name, m.date, m.breakfast, m.lunch, m.dinner
+    # 직원 식사 신청 내역 조회
+    cursor.execute("""
+        SELECT e.level, e.name, e.dept, m.date, m.breakfast, m.lunch, m.dinner
         FROM meals m
         JOIN employees e ON m.user_id = e.id
         WHERE m.date BETWEEN ? AND ?
-        ORDER BY e.dept, e.name, m.date
-    """
-    cursor.execute(query, (start, end))
-    rows = cursor.fetchall()
-    conn.close()
+        ORDER BY m.date, e.name
+    """, (start, end))
+    meal_rows = cursor.fetchall()
 
+    # 방문자 식사 신청 내역 조회
+    cursor.execute("""
+        SELECT v.dept, v.name, v.date, v.breakfast, v.lunch, v.dinner
+        FROM visitors v
+        WHERE v.date BETWEEN ? AND ?
+        ORDER BY v.date, v.name
+    """, (start, end))
+    visitor_rows = cursor.fetchall()
+
+    # DataFrame 생성
     import pandas as pd
-    df = pd.DataFrame(rows, columns=["dept", "name", "date", "breakfast", "lunch", "dinner"])
+    records = []
 
-    # ✅ 피벗 테이블 구성
-    df["조식"] = df["breakfast"].apply(lambda x: "O" if x else "")
-    df["중식"] = df["lunch"].apply(lambda x: "O" if x else "")
-    df["석식"] = df["dinner"].apply(lambda x: "O" if x else "")
-    df.drop(columns=["breakfast", "lunch", "dinner"], inplace=True)
+    for row in meal_rows:
+        level, name, dept, date, b, l, d = row
+        구분 = "직영" if level == 1 else "협력사"
+        if b: records.append([구분, date, name, dept, "조식"])
+        if l: records.append([구분, date, name, dept, "중식"])
+        if d: records.append([구분, date, name, dept, "석식"])
 
-    pivoted = df.pivot_table(index=["dept", "name"], columns="date", values=["조식", "중식", "석식"], aggfunc="first", fill_value="")
-    pivoted.columns = [f"{col[1]}_{col[0]}" for col in pivoted.columns]  # ex: 2025-06-24_조식
-    pivoted.reset_index(inplace=True)
+    for row in visitor_rows:
+        dept, name, date, b, l, d = row
+        name = name or ""
+        dept = dept or ""
+        if b: records.append(["방문자", date, name, dept, "조식"])
+        if l: records.append(["방문자", date, name, dept, "중식"])
+        if d: records.append(["방문자", date, name, dept, "석식"])
 
+    df = pd.DataFrame(records, columns=["구분", "식사일자", "이름", "부서", "식사구분"])
+
+    # 엑셀로 변환
     from io import BytesIO
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        pivoted.to_excel(writer, index=False, sheet_name="신청현황(피벗)")
+        df.to_excel(writer, index=False, sheet_name="식사신청이력")
     output.seek(0)
 
-    filename = f"meal_pivot_{start}_to_{end}.xlsx"
+    filename = f"meal_log_{start}_to_{end}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
