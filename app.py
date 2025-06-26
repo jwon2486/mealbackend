@@ -2023,11 +2023,6 @@ def weekly_dept_excel():
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-from flask import send_file, request
-import pandas as pd
-import sqlite3
-from io import BytesIO
-
 @app.route("/admin/stats/weekly_individual/excel")
 def weekly_individual_excel():
     start = request.args.get("start")
@@ -2036,14 +2031,18 @@ def weekly_individual_excel():
     if not start or not end:
         return "날짜 범위가 필요합니다", 400
 
-    # 직접 DB 연결
+    # DB 연결
     conn = sqlite3.connect("db.sqlite")
     conn.row_factory = sqlite3.Row
 
-    # 직영 식사 신청 내역
+    # 직영 및 협력사 신청 내역
     df_meals = pd.read_sql_query("""
         SELECT
-            '직영' AS 구분,
+            CASE
+                WHEN employee_type = '직영' THEN '직영'
+                WHEN employee_type = '협력사' THEN '협력사'
+                ELSE '기타'
+            END AS 구분,
             meal_date AS 식사일자,
             name AS 이름,
             department AS 부서,
@@ -2052,7 +2051,7 @@ def weekly_individual_excel():
         WHERE meal_date BETWEEN ? AND ?
     """, conn, params=(start, end))
 
-    # 방문자 식사 신청 내역
+    # 방문자 신청 내역
     df_visitors = pd.read_sql_query("""
         SELECT
             '방문자' AS 구분,
@@ -2064,29 +2063,42 @@ def weekly_individual_excel():
         WHERE visit_date BETWEEN ? AND ?
     """, conn, params=(start, end))
 
-    conn.close()  # 명시적 종료
+    conn.close()
 
-    # 데이터 통합 및 정렬
+    # 병합 및 정렬
     df_all = pd.concat([df_meals, df_visitors], ignore_index=True)
     df_all = df_all.sort_values(by=["식사일자", "구분", "부서", "식사구분", "이름"])
 
-    # 엑셀 파일 생성
+    # 엑셀 출력
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df_all.to_excel(writer, index=False, sheet_name="신청내역")
+        df_all.to_excel(writer, index=False, sheet_name="주간 개인 신청내역")
+
+        worksheet = writer.sheets["주간 개인 신청내역"]
+        header_format = writer.book.add_format({
+            "bold": True,
+            "align": "center",
+            "valign": "vcenter",
+            "bg_color": "#D9D9D9",
+            "border": 1
+        })
+
+        for col_num, value in enumerate(df_all.columns.values):
+            worksheet.write(0, col_num, value, header_format)
+
+        for i, column in enumerate(df_all.columns):
+            column_width = max(df_all[column].astype(str).map(len).max(), len(column)) + 2
+            worksheet.set_column(i, i, column_width)
 
     output.seek(0)
     filename = f"weekly_individual_{start}_to_{end}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-
-
-
-
-
-
-
+from flask import send_file, request
+import pandas as pd
+import sqlite3
+from io import BytesIO
 
 
 # ✅ [2] POST /visitors - 저장
