@@ -2276,37 +2276,40 @@ def delete_visitor_entry(vid):
     return jsonify({"message": "삭제되었습니다."}), 200
 
 # ✅ [5] 방문자 주간 신청 현황 (협력사/방문자 포함)
-@app.route("/visitors/weekly", methods=["GET"])
+@app.route("/visitors/weekly")
 def get_weekly_visitors():
     start = request.args.get("start")
     end = request.args.get("end")
-    applicant_id = request.args.get("id")  # 개인별 필터링 용도 (필요 시)
+    dept = request.args.get("dept")
+    name = request.args.get("name")
+    type_ = request.args.get("type")
 
-    if not (start and end):
-        return jsonify({"error": "start, end 파라미터가 필요합니다."}), 400
+    query = """
+        SELECT v.*, e.name AS applicant_name, e.dept, e.type
+        FROM visitors v
+        LEFT JOIN employees e ON v.applicant_id = e.id
+        WHERE v.date BETWEEN ? AND ?
+    """
+    params = [start, end]
+
+    if dept:
+        query += " AND e.dept LIKE ?"
+        params.append(f"%{dept}%")
+    if name:
+        query += " AND e.name LIKE ?"
+        params.append(f"%{name}%")
+    if type_:
+        query += " AND e.type = ?"
+        params.append(type_)
 
     conn = get_db_connection()
     cursor = conn.cursor()
-
-    if applicant_id:
-        cursor.execute("""
-            SELECT id, applicant_id, applicant_name, date, breakfast, lunch, dinner, reason, last_modified, type
-            FROM visitors
-            WHERE date BETWEEN ? AND ? AND applicant_id = ?
-            ORDER BY date
-        """, (start, end, applicant_id))
-    else:
-        cursor.execute("""
-            SELECT id, applicant_id, applicant_name, date, breakfast, lunch, dinner, reason, last_modified, type
-            FROM visitors
-            WHERE date BETWEEN ? AND ?
-            ORDER BY date
-        """, (start, end))
-
+    cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()
 
-    return jsonify([dict(row) for row in rows]), 200
+    return jsonify([dict(row) for row in rows])
+
 
 # ✅ [6] 방문자 신청 중복 확인용 API
 @app.route("/visitors/check", methods=["GET"])
