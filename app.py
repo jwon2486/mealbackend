@@ -2028,62 +2028,56 @@ def weekly_individual_excel():
     start = request.args.get("start")
     end = request.args.get("end")
 
+    if not start or not end:
+        return "날짜 범위가 필요합니다", 400
+
+    # DB로부터 직영 신청 내역 조회
     conn = get_connection()
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    df_meals = pd.read_sql(
+        """
+        SELECT
+            '직영' AS 구분,
+            meal_date AS 식사일자,
+            name AS 이름,
+            department AS 부서,
+            meal_type AS 식사구분
+        FROM meals
+        WHERE meal_date BETWEEN %s AND %s
+        """,
+        conn,
+        params=(start, end)
+    )
 
-    # 1. 일반 사용자 식사 신청 내역 조회
-    cursor.execute("""
-        SELECT m.meal_date, m.meal_type, u.username, u.dept, u.level
-        FROM meal_applications m
-        JOIN users u ON m.user_id = u.id
-        WHERE m.meal_date BETWEEN %s AND %s
-    """, (start, end))
-    meals = cursor.fetchall()
+    # 방문자 신청 내역 조회
+    df_visitors = pd.read_sql(
+        """
+        SELECT
+            '방문자' AS 구분,
+            visit_date AS 식사일자,
+            CONCAT(requester_name, '(방문자)') AS 이름,
+            department AS 부서,
+            meal_type AS 식사구분
+        FROM visitors
+        WHERE visit_date BETWEEN %s AND %s
+        """,
+        conn,
+        params=(start, end)
+    )
 
-    # 2. 방문자 식사 신청 내역 조회
-    cursor.execute("""
-        SELECT v.visit_date AS meal_date, v.meal_type, v.count, v.dept, v.name
-        FROM visitors v
-        WHERE v.visit_date BETWEEN %s AND %s
-    """, (start, end))
-    visitors = cursor.fetchall()
+    conn.close()
 
-    # 3. 행 단위 데이터 구성
-    rows = []
+    # 데이터 병합 및 정렬
+    df_all = pd.concat([df_meals, df_visitors], ignore_index=True)
+    df_all = df_all.sort_values(by=["식사일자", "구분", "부서", "식사구분", "이름"])
 
-    for m in meals:
-        rows.append({
-            "구분": "직영" if m["level"] == 1 else "협력사",
-            "식사일자": m["meal_date"],
-            "이름": m["username"],
-            "부서": m["dept"],
-            "식사구분": {0: "조식", 1: "중식", 2: "석식"}[m["meal_type"]]
-        })
-
-    for v in visitors:
-        for _ in range(v["count"]):
-            rows.append({
-                "구분": "방문객",
-                "식사일자": v["meal_date"],
-                "이름": v["name"],
-                "부서": v["dept"],
-                "식사구분": {0: "조식", 1: "중식", 2: "석식"}[v["meal_type"]]
-            })
-
-    # 4. DataFrame 변환 및 정렬
-    df = pd.DataFrame(rows).sort_values(by=["식사일자", "부서", "식사구분"])
-
-    # 5. Excel 생성
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="주간 식사신청 로그")
+    # 엑셀 저장
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df_all.to_excel(writer, index=False, sheet_name="신청내역")
 
     output.seek(0)
     filename = f"weekly_individual_{start}_to_{end}.xlsx"
-    return send_file(output, as_attachment=True, download_name=filename,
-                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
+    return send_file(output, as_attachment=True, download_name=filename, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 
