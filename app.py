@@ -2031,53 +2031,51 @@ def weekly_individual_excel():
     if not start or not end:
         return "날짜 범위가 필요합니다", 400
 
-    # DB로부터 직영 신청 내역 조회
-    conn = get_connection()
-    df_meals = pd.read_sql(
-        """
-        SELECT
-            '직영' AS 구분,
-            meal_date AS 식사일자,
-            name AS 이름,
-            department AS 부서,
-            meal_type AS 식사구분
-        FROM meals
-        WHERE meal_date BETWEEN %s AND %s
-        """,
-        conn,
-        params=(start, end)
-    )
+    try:
+        conn = get_connection()
 
-    # 방문자 신청 내역 조회
-    df_visitors = pd.read_sql(
-        """
-        SELECT
-            '방문자' AS 구분,
-            visit_date AS 식사일자,
-            CONCAT(requester_name, '(방문자)') AS 이름,
-            department AS 부서,
-            meal_type AS 식사구분
-        FROM visitors
-        WHERE visit_date BETWEEN %s AND %s
-        """,
-        conn,
-        params=(start, end)
-    )
+        # 직영 식사 신청 조회
+        df_meals = pd.read_sql_query("""
+            SELECT
+                '직영' AS 구분,
+                meal_date AS 식사일자,
+                name AS 이름,
+                department AS 부서,
+                meal_type AS 식사구분
+            FROM meals
+            WHERE meal_date BETWEEN ? AND ?
+        """, conn, params=(start, end))
 
-    conn.close()
+        # 방문자 식사 신청 조회
+        df_visitors = pd.read_sql_query("""
+            SELECT
+                '방문자' AS 구분,
+                visit_date AS 식사일자,
+                requester_name || '(방문자)' AS 이름,
+                department AS 부서,
+                meal_type AS 식사구분
+            FROM visitors
+            WHERE visit_date BETWEEN ? AND ?
+        """, conn, params=(start, end))
 
-    # 데이터 병합 및 정렬
-    df_all = pd.concat([df_meals, df_visitors], ignore_index=True)
-    df_all = df_all.sort_values(by=["식사일자", "구분", "부서", "식사구분", "이름"])
+        conn.close()
 
-    # 엑셀 저장
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df_all.to_excel(writer, index=False, sheet_name="신청내역")
+        # 데이터 병합 및 정렬
+        df_all = pd.concat([df_meals, df_visitors], ignore_index=True)
+        df_all = df_all.sort_values(by=["식사일자", "구분", "부서", "식사구분", "이름"])
 
-    output.seek(0)
-    filename = f"weekly_individual_{start}_to_{end}.xlsx"
-    return send_file(output, as_attachment=True, download_name=filename, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        # 엑셀 파일 생성
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df_all.to_excel(writer, index=False, sheet_name="신청내역")
+
+        output.seek(0)
+        filename = f"weekly_individual_{start}_to_{end}.xlsx"
+        return send_file(output, as_attachment=True, download_name=filename, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    except Exception as e:
+        print("❌ 오류 발생:", e)
+        return "서버 내부 오류", 500
 
 
 
