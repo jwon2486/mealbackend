@@ -2023,6 +2023,83 @@ def weekly_dept_excel():
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+@app.route("/admin/stats/weekly_individual/excel")
+def download_weekly_individual_excel():
+    start = request.args.get("start")
+    end = request.args.get("end")
+
+    if not (start and end):
+        return "start 또는 end 파라미터가 필요합니다.", 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # meals 테이블
+    cursor.execute("""
+        SELECT m.date, m.user_id, e.name, e.dept, e.type,
+               m.breakfast, m.lunch, m.dinner
+        FROM meals m
+        JOIN employees e ON m.user_id = e.id
+        WHERE m.date BETWEEN ? AND ?
+    """, (start, end))
+    meal_rows = cursor.fetchall()
+
+    # visitors 테이블
+    cursor.execute("""
+        SELECT v.date, v.applicant_id, v.applicant_name, v.type,
+               v.breakfast, v.lunch, v.dinner, e.dept
+        FROM visitors v
+        LEFT JOIN employees e ON v.applicant_id = e.id
+        WHERE v.date BETWEEN ? AND ?
+    """, (start, end))
+    visitor_rows = cursor.fetchall()
+    conn.close()
+
+    result_rows = []
+
+    # meals → 직영/협력사
+    for row in meal_rows:
+        for meal_type, key in zip(["조식", "중식", "석식"], ["breakfast", "lunch", "dinner"]):
+            if row[key] > 0:
+                result_rows.append({
+                    "구분": row["type"],
+                    "날짜": row["date"],
+                    "이름": row["name"],
+                    "사번": row["user_id"],
+                    "부서": row["dept"],
+                    "식사구분": meal_type
+                })
+
+    # visitors → 방문자/협력사
+    for row in visitor_rows:
+        for meal_type, key in zip(["조식", "중식", "석식"], ["breakfast", "lunch", "dinner"]):
+            for _ in range(row[key]):
+                result_rows.append({
+                    "구분": row["type"],
+                    "날짜": row["date"],
+                    "이름": row["applicant_name"],
+                    "사번": row["applicant_id"],
+                    "부서": row["dept"] or "-",
+                    "식사구분": meal_type
+                })
+
+    df = pd.DataFrame(result_rows)
+    df = df[["구분", "날짜", "이름", "사번", "부서", "식사구분"]]
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="주간 신청 상세")
+    output.seek(0)
+
+    filename = f"weekly_individual_{start}_to_{end}.xlsx"
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
 
 
 
