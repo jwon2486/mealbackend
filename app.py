@@ -2023,6 +2023,11 @@ def weekly_dept_excel():
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+from flask import send_file, request
+import pandas as pd
+import sqlite3
+from io import BytesIO
+
 @app.route("/admin/stats/weekly_individual/excel")
 def weekly_individual_excel():
     start = request.args.get("start")
@@ -2031,9 +2036,11 @@ def weekly_individual_excel():
     if not start or not end:
         return "날짜 범위가 필요합니다", 400
 
-    conn = get_connection()
+    # 직접 DB 연결
+    conn = sqlite3.connect("db.sqlite")
+    conn.row_factory = sqlite3.Row
 
-    # 직영 식사 신청 조회
+    # 직영 식사 신청 내역
     df_meals = pd.read_sql_query("""
         SELECT
             '직영' AS 구분,
@@ -2045,7 +2052,7 @@ def weekly_individual_excel():
         WHERE meal_date BETWEEN ? AND ?
     """, conn, params=(start, end))
 
-    # 방문자 식사 신청 조회
+    # 방문자 식사 신청 내역
     df_visitors = pd.read_sql_query("""
         SELECT
             '방문자' AS 구분,
@@ -2057,9 +2064,9 @@ def weekly_individual_excel():
         WHERE visit_date BETWEEN ? AND ?
     """, conn, params=(start, end))
 
-    conn.close()
+    conn.close()  # 명시적 종료
 
-    # 데이터 병합 및 정렬
+    # 데이터 통합 및 정렬
     df_all = pd.concat([df_meals, df_visitors], ignore_index=True)
     df_all = df_all.sort_values(by=["식사일자", "구분", "부서", "식사구분", "이름"])
 
@@ -2072,6 +2079,7 @@ def weekly_individual_excel():
     filename = f"weekly_individual_{start}_to_{end}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
