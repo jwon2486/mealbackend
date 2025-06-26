@@ -2032,6 +2032,7 @@ def download_weekly_individual_excel():
         return "start 또는 end 파라미터가 필요합니다.", 400
 
     conn = get_db_connection()
+    conn.row_factory = sqlite3.Row  # ✅ dict처럼 row["col_name"]으로 접근 가능하게 함
     cursor = conn.cursor()
 
     # meals 테이블
