@@ -2085,36 +2085,7 @@ def download_pivot_style_excel():
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-@app.route("/admin/excel_view", methods=["GET"])
-def get_excel_style_meals():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT 
-            e.type AS 구분,
-            m.date AS 식사일자,
-            e.name AS 이름,
-            e.dept AS 부서,
-            m.breakfast, m.lunch, m.dinner
-        FROM meals m
-        JOIN employees e ON m.user_id = e.id
-        ORDER BY m.date, e.type, e.dept, e.name
-    """)
-    rows = cursor.fetchall()
-    conn.close()
-
-    result = []
-    for row in rows:
-        for meal_type, label in zip(["breakfast", "lunch", "dinner"], ["조식", "중식", "석식"]):
-            if row[meal_type]:
-                result.append({
-                    "구분": row["구분"],
-                    "식사일자": row["식사일자"],
-                    "이름": row["이름"],
-                    "부서": row["부서"],
-                    "식사구분": label
-                })
-    return jsonify(result)
+from flask import jsonify
 
 
 
