@@ -2029,7 +2029,8 @@ def weekly_individual_excel():
     end = request.args.get("end")
 
     conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
 
     # 1. 일반 사용자 식사 신청 내역 조회
     cursor.execute("""
