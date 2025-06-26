@@ -2024,100 +2024,65 @@ def weekly_dept_excel():
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 @app.route("/admin/stats/weekly_individual/excel")
-def download_weekly_individual_excel():
+def weekly_individual_excel():
     start = request.args.get("start")
     end = request.args.get("end")
 
-    if not (start and end):
-        return "시작/종료 날짜 파라미터가 필요합니다.", 400
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
 
-    conn = get_db_connection()
-    conn.row_factory = sqlite3.Row  # ✅ dict 접근을 위해 반드시 설정
-    cursor = conn.cursor()
-
-    # 1. meals 테이블에서 신청 데이터 조회
+    # 1. 일반 사용자 식사 신청 내역 조회
     cursor.execute("""
-        SELECT m.date, m.user_id, e.name, e.dept, e.type,
-               m.breakfast, m.lunch, m.dinner
-        FROM meals m
-        JOIN employees e ON m.user_id = e.id
-        WHERE m.date BETWEEN ? AND ?
+        SELECT m.meal_date, m.meal_type, u.username, u.dept, u.level
+        FROM meal_applications m
+        JOIN users u ON m.user_id = u.id
+        WHERE m.meal_date BETWEEN %s AND %s
     """, (start, end))
-    meal_rows = cursor.fetchall()
+    meals = cursor.fetchall()
 
-    # 2. visitors 테이블에서 신청 데이터 조회
+    # 2. 방문자 식사 신청 내역 조회
     cursor.execute("""
-        SELECT v.date, v.applicant_id, v.applicant_name, v.type,
-               v.breakfast, v.lunch, v.dinner, e.dept
+        SELECT v.visit_date AS meal_date, v.meal_type, v.count, v.dept, v.name
         FROM visitors v
-        LEFT JOIN employees e ON v.applicant_id = e.id
-        WHERE v.date BETWEEN ? AND ?
+        WHERE v.visit_date BETWEEN %s AND %s
     """, (start, end))
-    visitor_rows = cursor.fetchall()
-    conn.close()
+    visitors = cursor.fetchall()
 
-    result_rows = []
+    # 3. 행 단위 데이터 구성
+    rows = []
 
-    # 3. meals 데이터 변환 (신청된 식사만 추출)
-    for row in meal_rows:
-        if row["breakfast"]:
-            result_rows.append({
-                "구분": row["type"],
-                "날짜": row["date"],
-                "이름": row["name"],
-                "사번": row["user_id"],
-                "부서": row["dept"],
-                "식사구분": "조식"
-            })
-        if row["lunch"]:
-            result_rows.append({
-                "구분": row["type"],
-                "날짜": row["date"],
-                "이름": row["name"],
-                "사번": row["user_id"],
-                "부서": row["dept"],
-                "식사구분": "중식"
-            })
-        if row["dinner"]:
-            result_rows.append({
-                "구분": row["type"],
-                "날짜": row["date"],
-                "이름": row["name"],
-                "사번": row["user_id"],
-                "부서": row["dept"],
-                "식사구분": "석식"
+    for m in meals:
+        rows.append({
+            "구분": "직영" if m["level"] == 1 else "협력사",
+            "식사일자": m["meal_date"],
+            "이름": m["username"],
+            "부서": m["dept"],
+            "식사구분": {0: "조식", 1: "중식", 2: "석식"}[m["meal_type"]]
+        })
+
+    for v in visitors:
+        for _ in range(v["count"]):
+            rows.append({
+                "구분": "방문객",
+                "식사일자": v["meal_date"],
+                "이름": v["name"],
+                "부서": v["dept"],
+                "식사구분": {0: "조식", 1: "중식", 2: "석식"}[v["meal_type"]]
             })
 
-    # 4. visitors 데이터 변환 (인원 수만큼 반복 생성)
-    for row in visitor_rows:
-        for meal_type, key in zip(["조식", "중식", "석식"], ["breakfast", "lunch", "dinner"]):
-            count = row[key]
-            for _ in range(count):
-                result_rows.append({
-                    "구분": row["type"],
-                    "날짜": row["date"],
-                    "이름": row["applicant_name"],
-                    "사번": row["applicant_id"],
-                    "부서": row["dept"] or "-",
-                    "식사구분": meal_type
-                })
+    # 4. DataFrame 변환 및 정렬
+    df = pd.DataFrame(rows).sort_values(by=["식사일자", "부서", "식사구분"])
 
-    # 5. 엑셀 저장
-    df = pd.DataFrame(result_rows)
-    df = df[["구분", "날짜", "이름", "사번", "부서", "식사구분"]]  # 열 순서 맞춤
+    # 5. Excel 생성
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="주간 식사신청 로그")
 
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="개별 신청내역")
     output.seek(0)
-
     filename = f"weekly_individual_{start}_to_{end}.xlsx"
-    return send_file(
-        output,
-        as_attachment=True,
-        download_name=filename,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    return send_file(output, as_attachment=True, download_name=filename,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
