@@ -2073,8 +2073,12 @@ def download_pivot_style_excel():
         if d: records.append(["방문자", date, name, dept, "석식"])
 
     df = pd.DataFrame(records, columns=["구분", "식사일자", "이름", "부서", "식사구분"])
+    # ✅ 날짜 포맷 고정 (문자열)
+    df["식사일자"] = df["식사일자"].astype(str)
 
-    # 엑셀로 변환
+    # 또는 명시적 포맷
+    # df["식사일자"] = pd.to_datetime(df["식사일자"]).dt.strftime("%Y-%m-%d")
+        # 엑셀로 변환
     from io import BytesIO
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
