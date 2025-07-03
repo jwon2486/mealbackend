@@ -2036,7 +2036,7 @@ def download_pivot_style_excel():
 
     # 직원 식사 신청 내역 조회
     cursor.execute("""
-        SELECT e.level, e.name, e.dept, m.date, m.breakfast, m.lunch, m.dinner
+        SELECT e.name, e.dept, m.date, m.breakfast, m.lunch, m.dinner
         FROM meals m
         JOIN employees e ON m.user_id = e.id
         WHERE m.date BETWEEN ? AND ?
