@@ -2035,7 +2035,7 @@ def download_pivot_excel():
         # 데이터 조회
         cursor.execute("""
             SELECT e.dept, e.name, m.date, m.meal_type
-            FROM meal_applications m
+            FROM meals m
             JOIN employees e ON m.employee_id = e.id
             WHERE m.date BETWEEN ? AND ?
             ORDER BY m.date, e.dept, e.name
