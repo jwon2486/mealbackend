@@ -2034,7 +2034,7 @@ def download_pivot_excel():
     # DB 연결
     conn = sqlite3.connect("db.sqlite")
 
-    # 1️⃣ meals + employees
+    # ✅ 직원(meals + employees) 데이터
     query_meals = """
         SELECT m.date, m.breakfast, m.lunch, m.dinner,
                e.name, e.dept, e.type
@@ -2057,7 +2057,7 @@ def download_pivot_excel():
     df_meals_final = pd.DataFrame(records_meals, columns=["구분", "식사일자", "이름", "부서", "식사 구분"])
     df_meals_final["식사일자"] = pd.to_datetime(df_meals_final["식사일자"]).dt.strftime("%Y-%m-%d")
 
-    # 2️⃣ visitors + 부서 (employees 조인)
+    # ✅ 방문객(visitors + dept) 데이터
     query_visitors = """
         SELECT v.applicant_name, v.date, v.breakfast, v.lunch, v.dinner, v.type,
                e.dept
@@ -2069,25 +2069,23 @@ def download_pivot_excel():
     df_visitors = pd.read_sql_query(query_visitors, conn, params=(start, end))
     conn.close()
 
-    summary_records = []
+    records_visitors = []
     for _, row in df_visitors.iterrows():
         if row["breakfast"] > 0:
-            summary_records.append([row["type"], row["date"], row["applicant_name"], row["dept"], f"조식({row['breakfast']})"])
+            records_visitors.append([row["type"], row["date"], row["dept"], row["breakfast"], "조식"])
         if row["lunch"] > 0:
-            summary_records.append([row["type"], row["date"], row["applicant_name"], row["dept"], f"중식({row['lunch']})"])
+            records_visitors.append([row["type"], row["date"], row["dept"], row["lunch"], "중식"])
         if row["dinner"] > 0:
-            summary_records.append([row["type"], row["date"], row["applicant_name"], row["dept"], f"석식({row['dinner']})"])
+            records_visitors.append([row["type"], row["date"], row["dept"], row["dinner"], "석식"])
 
-    df_visitors_final = pd.DataFrame(summary_records, columns=["구분", "식사일자", "이름", "부서", "식사 구분"])
+    df_visitors_final = pd.DataFrame(records_visitors, columns=["구분", "식사일자", "이름", "부서", "식사 구분"])
     df_visitors_final["식사일자"] = pd.to_datetime(df_visitors_final["식사일자"]).dt.strftime("%Y-%m-%d")
 
-    # 3️⃣ 엑셀 작성: meals → 공백 행 → visitors
-    empty_row = pd.DataFrame([[""] * df_meals_final.shape[1]], columns=df_meals_final.columns)
-    df_combined = pd.concat([df_meals_final, empty_row, df_visitors_final], ignore_index=True)
-
+    # ✅ 엑셀 파일 생성 (시트 분리)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df_combined.to_excel(writer, index=False, sheet_name="신청내역_통합")
+        df_meals_final.to_excel(writer, index=False, sheet_name="직원_식사신청")
+        df_visitors_final.to_excel(writer, index=False, sheet_name="방문객_신청요약")
 
     output.seek(0)
 
