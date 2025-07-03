@@ -2023,71 +2023,67 @@ def weekly_dept_excel():
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 # 피벗엑셀 테스트용 코드
-@app.route('/admin/stats/pivot_excel', methods=['GET'])
-def download_pivot_excel():
-    start = request.args.get('start')
-    end = request.args.get('end')
+@app.route("/admin/stats/pivot_excel", methods=["GET"])
+def download_pivot_style_excel():
+    import pandas as pd
+    from io import BytesIO
+
+    start = request.args.get("start")
+    end = request.args.get("end")
+
+    if not start or not end:
+        return "start, end 날짜를 지정해주세요.", 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    try:
-        # 데이터 조회
-        cursor.execute("""
-            SELECT e.dept, e.name, m.date, m.meal_type
-            FROM meals m
-            JOIN employees e ON m.employee_id = e.id
-            WHERE m.date BETWEEN ? AND ?
-            ORDER BY m.date, e.dept, e.name
-        """, (start, end))
-        
-        rows = cursor.fetchall()
-        conn.close()
+    # 직원 식사 신청 + 직원 정보 조인
+    cursor.execute("""
+        SELECT m.date, m.breakfast, m.lunch, m.dinner,
+               e.name, e.dept, e.type
+        FROM meals m
+        JOIN employees e ON m.user_id = e.id
+        WHERE m.date BETWEEN ? AND ?
+        ORDER BY m.date, e.name
+    """, (start, end))
 
-        # Row 객체 → 튜플로 변환
-        rows = [tuple(row) for row in rows]
+    rows = cursor.fetchall()
+    conn.close()
 
-        # 데이터프레임 생성
-        df = pd.DataFrame(rows, columns=['dept', 'name', 'date', 'meal_type'])
+    # 행 단위로 분해
+    records = []
+    for row in rows:
+        date, b, l, d, name, dept, type_ = row
+        if b == 1:
+            records.append([type_, date, name, dept, "조식"])
+        if l == 1:
+            records.append([type_, date, name, dept, "중식"])
+        if d == 1:
+            records.append([type_, date, name, dept, "석식"])
 
-        if df.empty:
-            return 'No meal application data found for the selected period.', 404
+    # DataFrame 생성
+    df = pd.DataFrame(records, columns=["구분", "식사일자", "이름", "부서", "식사 구분"])
+    df["식사일자"] = pd.to_datetime(df["식사일자"]).dt.strftime("%Y-%m-%d")
 
-        # 피벗 테이블 생성
-        pivot = pd.pivot_table(
-            df,
-            index=['dept', 'name'],
-            columns=['date', 'meal_type'],
-            aggfunc='size',
-            fill_value=0
-        )
+    # 엑셀로 저장
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="식사신청내역")
 
-        # 컬럼 이름 재구성
-        if isinstance(pivot.columns, pd.MultiIndex):
-            pivot.columns = ['{}_{}'.format(col[0], col[1]) for col in pivot.columns]
-        else:
-            pivot.columns = pivot.columns.astype(str)
+    output.seek(0)
+    filename = f"meal_pivot_{start}_to_{end}.xlsx"
+    return send_file(output, as_attachment=True, download_name=filename,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        pivot.reset_index(inplace=True)
 
-        # 엑셀 파일로 출력
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            pivot.to_excel(writer, index=False, sheet_name='PivotTable')
+from flask import jsonify
 
-        output.seek(0)
 
-        return send_file(
-            output,
-            download_name='pivot_table.xlsx',
-            as_attachment=True,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-    
-    except Exception as e:
-        conn.close()
-        return f'Internal Server Error: {str(e)}', 500
 
+from flask import send_file, request
+import pandas as pd
+import sqlite3
+from io import BytesIO
 
 
 # ✅ [2] POST /visitors - 저장
