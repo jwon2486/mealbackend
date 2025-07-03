@@ -2023,58 +2023,76 @@ def weekly_dept_excel():
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 # 피벗엑셀 테스트용 코드
-@app.route("/admin/stats/pivot_excel", methods=["GET"])
-def download_pivot_style_excel():
-    import pandas as pd
-    from io import BytesIO
-
+@app.route("/admin/stats/pivot_excel")
+def download_pivot_excel():
     start = request.args.get("start")
     end = request.args.get("end")
 
     if not start or not end:
         return "start, end 날짜를 지정해주세요.", 400
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    # DB 연결
+    conn = sqlite3.connect("db.sqlite")
 
-    # 직원 식사 신청 + 직원 정보 조인
-    cursor.execute("""
+    # 1️⃣ meals + employees
+    query_meals = """
         SELECT m.date, m.breakfast, m.lunch, m.dinner,
                e.name, e.dept, e.type
         FROM meals m
         JOIN employees e ON m.user_id = e.id
         WHERE m.date BETWEEN ? AND ?
         ORDER BY m.date, e.name
-    """, (start, end))
+    """
+    df_meals = pd.read_sql_query(query_meals, conn, params=(start, end))
 
-    rows = cursor.fetchall()
+    records_meals = []
+    for _, row in df_meals.iterrows():
+        if row["breakfast"] == 1:
+            records_meals.append([row["type"], row["date"], row["name"], row["dept"], "조식"])
+        if row["lunch"] == 1:
+            records_meals.append([row["type"], row["date"], row["name"], row["dept"], "중식"])
+        if row["dinner"] == 1:
+            records_meals.append([row["type"], row["date"], row["name"], row["dept"], "석식"])
+
+    df_meals_final = pd.DataFrame(records_meals, columns=["구분", "식사일자", "이름", "부서", "식사 구분"])
+    df_meals_final["식사일자"] = pd.to_datetime(df_meals_final["식사일자"]).dt.strftime("%Y-%m-%d")
+
+    # 2️⃣ visitors + 부서 (employees 조인)
+    query_visitors = """
+        SELECT v.applicant_name, v.date, v.breakfast, v.lunch, v.dinner, v.type,
+               e.dept
+        FROM visitors v
+        LEFT JOIN employees e ON v.applicant_id = e.id
+        WHERE v.date BETWEEN ? AND ?
+        ORDER BY v.date, v.applicant_name
+    """
+    df_visitors = pd.read_sql_query(query_visitors, conn, params=(start, end))
     conn.close()
 
-    # 행 단위로 분해
-    records = []
-    for row in rows:
-        date, b, l, d, name, dept, type_ = row
-        if b == 1:
-            records.append([type_, date, name, dept, "조식"])
-        if l == 1:
-            records.append([type_, date, name, dept, "중식"])
-        if d == 1:
-            records.append([type_, date, name, dept, "석식"])
+    summary_records = []
+    for _, row in df_visitors.iterrows():
+        if row["breakfast"] > 0:
+            summary_records.append([row["type"], row["date"], row["applicant_name"], row["dept"], f"조식({row['breakfast']})"])
+        if row["lunch"] > 0:
+            summary_records.append([row["type"], row["date"], row["applicant_name"], row["dept"], f"중식({row['lunch']})"])
+        if row["dinner"] > 0:
+            summary_records.append([row["type"], row["date"], row["applicant_name"], row["dept"], f"석식({row['dinner']})"])
 
-    # DataFrame 생성
-    df = pd.DataFrame(records, columns=["구분", "식사일자", "이름", "부서", "식사 구분"])
-    df["식사일자"] = pd.to_datetime(df["식사일자"]).dt.strftime("%Y-%m-%d")
+    df_visitors_final = pd.DataFrame(summary_records, columns=["구분", "식사일자", "이름", "부서", "식사 구분"])
+    df_visitors_final["식사일자"] = pd.to_datetime(df_visitors_final["식사일자"]).dt.strftime("%Y-%m-%d")
 
-    # 엑셀로 저장
+    # 3️⃣ 엑셀 작성: meals → 공백 행 → visitors
+    empty_row = pd.DataFrame([[""] * df_meals_final.shape[1]], columns=df_meals_final.columns)
+    df_combined = pd.concat([df_meals_final, empty_row, df_visitors_final], ignore_index=True)
+
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="식사신청내역")
+        df_combined.to_excel(writer, index=False, sheet_name="신청내역_통합")
 
     output.seek(0)
-    filename = f"meal_pivot_{start}_to_{end}.xlsx"
-    return send_file(output, as_attachment=True, download_name=filename,
-                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+    filename = f"meal_pivot_{start}_to_{end}.xlsx"
+    return send_file(output, download_name=filename, as_attachment=True)
 
 from flask import jsonify
 
