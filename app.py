@@ -171,21 +171,20 @@ def get_public_holidays():
     if not year:
         return jsonify({"error": "Missing 'year' parameter"}), 400
 
-    # ✅ serviceKey를 URL-safe하게 인코딩
-    raw_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
-    encoded_key = quote(raw_key, safe='')  # 이 줄이 매우 중요!
+    # ✅ 인코딩하지 않은 원본 인증키 사용
+    service_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
 
     url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getHoliDeInfo"
 
     headers = {
-        "User-Agent": "Mozilla/5.0"  # 꼭 설정
+        "User-Agent": "Mozilla/5.0"
     }
 
     holidays = []
 
     for month in range(1, 13):
         params = {
-            'serviceKey': encoded_key,
+            'serviceKey': service_key,  # ❌ quote 없이 원본 그대로 사용
             'solYear': year,
             'solMonth': f"{month:02d}"
         }
@@ -215,7 +214,6 @@ def get_public_holidays():
             continue
 
     return jsonify(holidays)
-
 
 
 
