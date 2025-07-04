@@ -12,9 +12,7 @@ from flask_cors import CORS
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from collections import defaultdict
-from flask import send_file
 from io import BytesIO
-from datetime import datetime
 import calendar
 import sqlite3
 import pandas as pd
@@ -22,6 +20,9 @@ import os
 import re
 import shutil  # ✅ DB 파일 복사용
 import xmltodict
+import requests
+import ssl
+from requests.adapters import HTTPAdapter
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -157,15 +158,11 @@ def download_database():
     else:
         return "DB 파일이 존재하지 않습니다.", 404
 
-import requests  # 맨 위에 없으면 꼭 추가
 
-from flask import request, jsonify
-import requests
-import ssl
-import xmltodict
-from requests.adapters import HTTPAdapter
 
-# ✅ SSL 우회 세션 클래스
+
+
+# SSL 오류 우회를 위한 requests 어댑터 클래스
 class SSLAdapter(HTTPAdapter):
     def init_poolmanager(self, *args, **kwargs):
         ctx = ssl.create_default_context()
@@ -173,70 +170,88 @@ class SSLAdapter(HTTPAdapter):
         kwargs['ssl_context'] = ctx
         return super().init_poolmanager(*args, **kwargs)
 
-# ✅ SSL 세션 생성 함수
-def get_ssl_bypass_session():
-    session = requests.Session()
-    session.mount("https://", SSLAdapter())
-    return session
+# 지정된 연도(year)에 대해 공휴일 API를 갱신해야 하는지 판단 (7일 경과 여부 확인)
+def should_refresh_public_holidays(year):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS public_holiday_meta (year INTEGER PRIMARY KEY, last_checked TEXT)")
+    cur.execute("SELECT last_checked FROM public_holiday_meta WHERE year = ?", (year,))
+    row = cur.fetchone()
+    conn.close()
 
-# ✅ 공공 공휴일 API 라우트
-@app.route('/api/public-holidays')
+    if not row:
+        return True
+    last_checked = datetime.fromisoformat(row[0])
+    return (datetime.now() - last_checked).days >= 7
+
+# 해당 연도(year)의 공휴일 데이터를 최신으로 갱신한 시각을 기록
+def update_last_checked(year):
+    now_str = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO public_holiday_meta (year, last_checked)
+        VALUES (?, ?)
+        ON CONFLICT(year) DO UPDATE SET last_checked = excluded.last_checked
+    """, (year, now_str))
+    conn.commit()
+    conn.close()
+
+# 📌 공공 API 또는 DB 캐시를 활용하여 지정 연도의 공휴일 목록을 반환하는 엔드포인트
+@app.route("/api/public-holidays")
 def get_public_holidays():
-    year = request.args.get("year")
-    if not year:
-        return jsonify({"error": "연도(year) 파라미터가 필요합니다."}), 400
+    year = request.args.get("year", default=datetime.now().year, type=int)
 
-    base_url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
-    service_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
-    headers = {"User-Agent": "Mozilla/5.0"}
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS public_holidays (
+            date TEXT PRIMARY KEY,
+            description TEXT,
+            source TEXT
+        )
+    """)
+    conn.commit()
 
-    session = get_ssl_bypass_session()
-    holidays = []
+    if should_refresh_public_holidays(year):
+        session = requests.Session()
+        session.mount("https://", SSLAdapter())
 
-    for month in range(1, 13):
-        params = {
-            "serviceKey": service_key,
-            "solYear": year,
-            "solMonth": f"{month:02d}"
-        }
+        for month in range(1, 13):
+            url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
+            params = {
+                "serviceKey": "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw==",
+                "solYear": str(year),
+                "solMonth": f"{month:02d}"
+            }
+            try:
+                response = session.get(url, params=params, timeout=10)
+                data = xmltodict.parse(response.text)
+                items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
 
-        try:
-            response = session.get(base_url, params=params, headers=headers, timeout=10)
-            response.raise_for_status()
-            data = xmltodict.parse(response.text)
+                if isinstance(items, dict):
+                    items = [items]
 
-            items_node = data.get("response", {}).get("body", {}).get("items")
-            if not items_node:
-                print(f"📭 {month}월 공휴일 없음 (정상)")
-                continue
+                for item in items:
+                    locdate = item.get("locdate")
+                    desc = item.get("dateName")
+                    if locdate and desc:
+                        formatted = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
+                        try:
+                            cur.execute("INSERT OR IGNORE INTO public_holidays (date, description, source) VALUES (?, ?, ?)",
+                                        (formatted, desc, "api"))
+                        except Exception as e:
+                            print(f"❌ DB 삽입 실패: {formatted}, {desc}, error={e}")
 
-            items = items_node.get("item", [])
-            if isinstance(items, dict):
-                items = [items]
+            except Exception as e:
+                print(f"❌ {month}월 공공 공휴일 호출 실패: {e}")
 
-            month_holidays = []
+        conn.commit()
+        update_last_checked(year)
 
-            for item in items:
-                locdate = item.get("locdate")
-                name = item.get("dateName")
-                if locdate and name:
-                    formatted = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
-                    holiday = {
-                        "date": formatted,
-                        "description": name,
-                        "source": "api"
-                    }
-                    holidays.append(holiday)
-                    month_holidays.append(holiday)
-
-            if month_holidays:
-                print(f"✅ {month}월 공휴일 {len(month_holidays)}건:")
-                for h in month_holidays:
-                    print(f"   - {h['date']} : {h['description']}")
-
-        except Exception as e:
-            print(f"❌ {month}월 공휴일 호출 실패:", e)
-            continue
+    cur.execute("SELECT date, description, source FROM public_holidays WHERE substr(date, 1, 4) = ?", (str(year),))
+    holidays = [{"date": row[0], "description": row[1], "source": row[2]} for row in cur.fetchall()]
+    conn.close()
 
     return jsonify(holidays)
 
@@ -1343,7 +1358,6 @@ def download_dept_summary_excel():
     conn.close()
 
     # ✅ 통합 집계
-    from collections import defaultdict
     summary = defaultdict(lambda: {"breakfast": 0, "lunch": 0, "dinner": 0})
 
     for row in meal_rows + visitor_rows:
@@ -1362,7 +1376,6 @@ def download_dept_summary_excel():
     # ✅ DataFrame 구성
     import pandas as pd
     from io import BytesIO
-    from flask import send_file
 
     result = []
     for (dept, t), meals in summary.items():
@@ -2184,14 +2197,7 @@ def download_pivot_excel():
     filename = f"meal_pivot_{start}_to_{end}.xlsx"
     return send_file(output, download_name=filename, as_attachment=True)
 
-from flask import jsonify
 
-
-
-from flask import send_file, request
-import pandas as pd
-import sqlite3
-from io import BytesIO
 
 
 # ✅ [2] POST /visitors - 저장
