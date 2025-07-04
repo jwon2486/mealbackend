@@ -165,20 +165,21 @@ import ssl
 import xmltodict
 from requests.adapters import HTTPAdapter
 
-# ✅ SSL 우회 세션 생성 함수
-def get_ssl_bypass_session():
-    class SSLAdapter(HTTPAdapter):
-        def init_poolmanager(self, *args, **kwargs):
-            ctx = ssl.create_default_context()
-            ctx.set_ciphers("DEFAULT@SECLEVEL=1")
-            kwargs['ssl_context'] = ctx
-            return super().init_poolmanager(*args, **kwargs)
+# ✅ SSL 우회 세션 클래스
+class SSLAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context()
+        ctx.set_ciphers("DEFAULT@SECLEVEL=1")
+        kwargs['ssl_context'] = ctx
+        return super().init_poolmanager(*args, **kwargs)
 
+# ✅ SSL 세션 생성 함수
+def get_ssl_bypass_session():
     session = requests.Session()
     session.mount("https://", SSLAdapter())
     return session
 
-# ✅ /api/public-holidays: 캐시 없이 직접 호출 후 JSON 반환
+# ✅ 공공 공휴일 API 라우트
 @app.route('/api/public-holidays')
 def get_public_holidays():
     year = request.args.get("year")
@@ -204,7 +205,6 @@ def get_public_holidays():
             response.raise_for_status()
             data = xmltodict.parse(response.text)
 
-            # ✅ 공휴일 없는 경우 대응
             items_node = data.get("response", {}).get("body", {}).get("items")
             if not items_node:
                 print(f"📭 {month}월 공휴일 없음 (정상)")
@@ -214,22 +214,32 @@ def get_public_holidays():
             if isinstance(items, dict):
                 items = [items]
 
+            month_holidays = []
+
             for item in items:
                 locdate = item.get("locdate")
                 name = item.get("dateName")
                 if locdate and name:
                     formatted = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
-                    holidays.append({
+                    holiday = {
                         "date": formatted,
                         "description": name,
                         "source": "api"
-                    })
+                    }
+                    holidays.append(holiday)
+                    month_holidays.append(holiday)
+
+            if month_holidays:
+                print(f"✅ {month}월 공휴일 {len(month_holidays)}건:")
+                for h in month_holidays:
+                    print(f"   - {h['date']} : {h['description']}")
 
         except Exception as e:
             print(f"❌ {month}월 공휴일 호출 실패:", e)
             continue
 
     return jsonify(holidays)
+
 
 
 
