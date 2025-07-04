@@ -164,7 +164,6 @@ import requests
 import xmltodict
 from urllib.parse import quote
 
-app = Flask(__name__)
 
 @app.route('/api/public-holidays')
 def get_public_holidays():
