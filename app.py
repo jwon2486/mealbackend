@@ -25,8 +25,10 @@ import ssl
 from requests.adapters import HTTPAdapter
 
 
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE = os.path.join(BASE_DIR, "db.sqlite")
+DB_PATH = "db.sqlite"
 
 # Flask 앱 생성
 app = Flask(__name__)
