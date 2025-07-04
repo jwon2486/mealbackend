@@ -204,13 +204,19 @@ def get_public_holidays():
             response.raise_for_status()
             data = xmltodict.parse(response.text)
 
-            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-            if isinstance(items, dict):  # 단일 항목일 경우
+            # ✅ 공휴일 없는 경우 대응
+            items_node = data.get("response", {}).get("body", {}).get("items")
+            if not items_node:
+                print(f"📭 {month}월 공휴일 없음 (정상)")
+                continue
+
+            items = items_node.get("item", [])
+            if isinstance(items, dict):
                 items = [items]
 
             for item in items:
-                locdate = item.get("locdate")  # ex: 20251225
-                name = item.get("dateName")    # ex: 기독탄신일
+                locdate = item.get("locdate")
+                name = item.get("dateName")
                 if locdate and name:
                     formatted = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
                     holidays.append({
@@ -218,11 +224,13 @@ def get_public_holidays():
                         "description": name,
                         "source": "api"
                     })
+
         except Exception as e:
             print(f"❌ {month}월 공휴일 호출 실패:", e)
-            continue  # 실패한 월은 무시하고 다음으로
+            continue
 
     return jsonify(holidays)
+
 
 
 
