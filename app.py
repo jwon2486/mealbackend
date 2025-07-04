@@ -159,72 +159,72 @@ def download_database():
 
 import requests  # 맨 위에 없으면 꼭 추가
 
-from flask import Flask, request, jsonify
-import requests, xmltodict
-from urllib.parse import quote
-from datetime import datetime
+from flask import request, jsonify
+import requests
+import ssl
+import xmltodict
+from requests.adapters import HTTPAdapter
 
-# 캐시 구조: { "2025": { "data": [...], "timestamp": 1720000000.0 } }
-holiday_cache = {}
-CACHE_EXPIRY_SECONDS = 60 * 60 * 24 * 7  # 7일 (604800초)
+# ✅ SSL 우회 세션 생성 함수
+def get_ssl_bypass_session():
+    class SSLAdapter(HTTPAdapter):
+        def init_poolmanager(self, *args, **kwargs):
+            ctx = ssl.create_default_context()
+            ctx.set_ciphers("DEFAULT@SECLEVEL=1")
+            kwargs['ssl_context'] = ctx
+            return super().init_poolmanager(*args, **kwargs)
 
+    session = requests.Session()
+    session.mount("https://", SSLAdapter())
+    return session
+
+# ✅ /api/public-holidays: 캐시 없이 직접 호출 후 JSON 반환
 @app.route('/api/public-holidays')
 def get_public_holidays():
-    year = request.args.get('year')
+    year = request.args.get("year")
     if not year:
-        return jsonify({"error": "Missing 'year' parameter"}), 400
+        return jsonify({"error": "연도(year) 파라미터가 필요합니다."}), 400
 
-    # 캐시가 있고, 만료되지 않았으면 반환
-    if year in holiday_cache:
-        cached = holiday_cache[year]
-        if time.time() - cached["timestamp"] < CACHE_EXPIRY_SECONDS:
-            return jsonify(cached["data"])
-
-    # API 호출
+    base_url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
     service_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
-    url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getHoliDeInfo"
     headers = {"User-Agent": "Mozilla/5.0"}
 
+    session = get_ssl_bypass_session()
     holidays = []
 
     for month in range(1, 13):
         params = {
-            'serviceKey': service_key,
-            'solYear': year,
-            'solMonth': f"{month:02d}"
+            "serviceKey": service_key,
+            "solYear": year,
+            "solMonth": f"{month:02d}"
         }
 
         try:
-            response = requests.get(url, params=params, headers=headers, timeout=10)
+            response = session.get(base_url, params=params, headers=headers, timeout=10)
             response.raise_for_status()
-            data = xmltodict.parse(response.content)
+            data = xmltodict.parse(response.text)
 
-            items = data.get('response', {}).get('body', {}).get('items', {}).get('item', [])
-            if isinstance(items, dict):  # 단일 항목
+            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+            if isinstance(items, dict):  # 단일 항목일 경우
                 items = [items]
 
             for item in items:
-                locdate = str(item.get('locdate'))
-                dateName = item.get('dateName')
-                if locdate and dateName:
-                    formatted_date = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
+                locdate = item.get("locdate")  # ex: 20251225
+                name = item.get("dateName")    # ex: 기독탄신일
+                if locdate and name:
+                    formatted = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
                     holidays.append({
-                        'date': formatted_date,
-                        'description': dateName,
-                        'type': '공공'
+                        "date": formatted,
+                        "description": name,
+                        "source": "api"
                     })
-
         except Exception as e:
-            print(f"❗ {month}월 공공 공휴일 호출 실패: {e}")
-            continue
-
-    # 캐시에 저장
-    holiday_cache[year] = {
-        "data": holidays,
-        "timestamp": time.time()
-    }
+            print(f"❌ {month}월 공휴일 호출 실패:", e)
+            continue  # 실패한 월은 무시하고 다음으로
 
     return jsonify(holidays)
+
+
 
 
 
