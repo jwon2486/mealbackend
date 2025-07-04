@@ -169,6 +169,7 @@ def get_public_holidays():
     if not year:
         return jsonify({"error": "Missing 'year' parameter"}), 400
 
+    # ✅ 디코딩된 일반 인증키 사용
     service_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
     url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getHoliDeInfo"
 
