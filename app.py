@@ -163,8 +163,6 @@ from flask import Flask, request, jsonify
 import requests
 import xmltodict
 
-app = Flask(__name__)
-
 @app.route('/api/public-holidays')
 def get_public_holidays():
     year = request.args.get('year')
