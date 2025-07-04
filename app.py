@@ -160,10 +160,13 @@ def download_database():
 import requests  # 맨 위에 없으면 꼭 추가
 
 from flask import Flask, request, jsonify
-import requests
-import xmltodict
+import requests, xmltodict
 from urllib.parse import quote
+from datetime import datetime
 
+# 캐시 구조: { "2025": { "data": [...], "timestamp": 1720000000.0 } }
+holiday_cache = {}
+CACHE_EXPIRY_SECONDS = 60 * 60 * 24 * 7  # 7일 (604800초)
 
 @app.route('/api/public-holidays')
 def get_public_holidays():
@@ -171,20 +174,22 @@ def get_public_holidays():
     if not year:
         return jsonify({"error": "Missing 'year' parameter"}), 400
 
-    # ✅ 인코딩하지 않은 원본 인증키 사용
+    # 캐시가 있고, 만료되지 않았으면 반환
+    if year in holiday_cache:
+        cached = holiday_cache[year]
+        if time.time() - cached["timestamp"] < CACHE_EXPIRY_SECONDS:
+            return jsonify(cached["data"])
+
+    # API 호출
     service_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
-
     url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getHoliDeInfo"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     holidays = []
 
     for month in range(1, 13):
         params = {
-            'serviceKey': service_key,  # ❌ quote 없이 원본 그대로 사용
+            'serviceKey': service_key,
             'solYear': year,
             'solMonth': f"{month:02d}"
         }
@@ -195,11 +200,11 @@ def get_public_holidays():
             data = xmltodict.parse(response.content)
 
             items = data.get('response', {}).get('body', {}).get('items', {}).get('item', [])
-            if isinstance(items, dict):  # 단일 항목이면 리스트로 변환
+            if isinstance(items, dict):  # 단일 항목
                 items = [items]
 
             for item in items:
-                locdate = str(item.get('locdate'))  # 예: 20251003
+                locdate = str(item.get('locdate'))
                 dateName = item.get('dateName')
                 if locdate and dateName:
                     formatted_date = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
@@ -213,7 +218,14 @@ def get_public_holidays():
             print(f"❗ {month}월 공공 공휴일 호출 실패: {e}")
             continue
 
+    # 캐시에 저장
+    holiday_cache[year] = {
+        "data": holidays,
+        "timestamp": time.time()
+    }
+
     return jsonify(holidays)
+
 
 
 
