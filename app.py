@@ -162,6 +162,7 @@ import requests  # 맨 위에 없으면 꼭 추가
 from flask import Flask, request, jsonify
 import requests
 import xmltodict
+from urllib.parse import quote
 
 app = Flask(__name__)
 
@@ -171,30 +172,36 @@ def get_public_holidays():
     if not year:
         return jsonify({"error": "Missing 'year' parameter"}), 400
 
-    # ✅ 디코딩된 인증키를 직접 사용 (브라우저와 동일한 형태)
-    service_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2%2BzEQeNWBabS%2BRS3BluouR%2BNTBgt7a0Djq%2BuiErl%2BkKKKw%3D%3D"
-    base_url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getHoliDeInfo"
+    # ✅ serviceKey를 URL-safe하게 인코딩
+    raw_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
+    encoded_key = quote(raw_key, safe='')  # 이 줄이 매우 중요!
+
+    url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getHoliDeInfo"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"  # 꼭 설정
+    }
 
     holidays = []
 
     for month in range(1, 13):
-        # ✅ 전체 URL 직접 조합 (params 쓰지 않음)
-        full_url = (
-            f"{base_url}?serviceKey={service_key}"
-            f"&solYear={year}&solMonth={month:02d}"
-        )
+        params = {
+            'serviceKey': encoded_key,
+            'solYear': year,
+            'solMonth': f"{month:02d}"
+        }
 
         try:
-            response = requests.get(full_url)
+            response = requests.get(url, params=params, headers=headers, timeout=10)
             response.raise_for_status()
             data = xmltodict.parse(response.content)
 
             items = data.get('response', {}).get('body', {}).get('items', {}).get('item', [])
-            if isinstance(items, dict):  # 단일 항목일 경우
+            if isinstance(items, dict):  # 단일 항목이면 리스트로 변환
                 items = [items]
 
             for item in items:
-                locdate = str(item.get('locdate'))  # e.g., "20251003"
+                locdate = str(item.get('locdate'))  # 예: 20251003
                 dateName = item.get('dateName')
                 if locdate and dateName:
                     formatted_date = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
@@ -209,6 +216,7 @@ def get_public_holidays():
             continue
 
     return jsonify(holidays)
+
 
 
 
