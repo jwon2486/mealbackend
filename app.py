@@ -163,6 +163,8 @@ from flask import Flask, request, jsonify
 import requests
 import xmltodict
 
+app = Flask(__name__)
+
 @app.route('/api/public-holidays')
 def get_public_holidays():
     year = request.args.get('year')
@@ -170,7 +172,7 @@ def get_public_holidays():
         return jsonify({"error": "Missing 'year' parameter"}), 400
 
     # ✅ 디코딩된 인증키를 직접 사용 (브라우저와 동일한 형태)
-    service_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
+    service_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2%2BzEQeNWBabS%2BRS3BluouR%2BNTBgt7a0Djq%2BuiErl%2BkKKKw%3D%3D"
     base_url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getHoliDeInfo"
 
     holidays = []
