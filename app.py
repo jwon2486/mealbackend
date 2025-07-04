@@ -21,6 +21,7 @@ import pandas as pd
 import os
 import re
 import shutil  # ✅ DB 파일 복사용
+import xmltodict
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -158,51 +159,54 @@ def download_database():
 
 import requests  # 맨 위에 없으면 꼭 추가
 
-@app.route("/api/public-holidays")
+from flask import request, jsonify
+import requests
+import xmltodict
+
+@app.route('/api/public-holidays')
 def get_public_holidays():
-    import requests
-    from datetime import datetime
-    from flask import request, jsonify
+    year = request.args.get('year')
+    if not year:
+        return jsonify({"error": "Missing 'year' parameter"}), 400
 
-    year = request.args.get("year", type=int, default=datetime.now().year)
-
-    api_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
-    base_url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
+    service_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
+    url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getHoliDeInfo"
 
     holidays = []
 
     for month in range(1, 13):
         params = {
-            "ServiceKey": api_key,
-            "solYear": str(year),
-            "solMonth": f"{month:02d}",
-            "_type": "json"
+            'serviceKey': service_key,
+            'solYear': year,
+            'solMonth': f"{month:02d}"
         }
 
         try:
-            res = requests.get(base_url, params=params)
-            res.raise_for_status()
-            data = res.json()
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = xmltodict.parse(response.content)
 
-            items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-
-            if isinstance(items, dict):  # 단일 공휴일일 경우
+            items = data.get('response', {}).get('body', {}).get('items', {}).get('item', [])
+            if isinstance(items, dict):  # 단일 항목일 경우
                 items = [items]
 
-            for h in items:
-                locdate = str(h.get("locdate", ""))
-                date_obj = datetime.strptime(locdate, "%Y%m%d")
-                date_str = date_obj.strftime("%Y-%m-%d")
-
-                holidays.append({
-                    "date": date_str,
-                    "description": h.get("dateName", "")
-                })
+            for item in items:
+                locdate = str(item.get('locdate'))  # e.g., 20251003
+                dateName = item.get('dateName')
+                if locdate and dateName:
+                    formatted_date = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
+                    holidays.append({
+                        'date': formatted_date,
+                        'description': dateName,
+                        'type': '공공'
+                    })
 
         except Exception as e:
-            print(f"❗ {month}월 공휴일 요청 실패:", e)
+            print(f"❗ {month}월 공공 공휴일 호출 실패: {e}")
+            continue
 
     return jsonify(holidays)
+
 
 
 # ✅ [GET] /holidays?year=YYYY
