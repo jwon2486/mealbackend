@@ -160,47 +160,50 @@ import requests  # 맨 위에 없으면 꼭 추가
 
 @app.route("/api/public-holidays")
 def get_public_holidays():
-    year = request.args.get("year")
-    if not year:
-        return jsonify({"error": "Missing year"}), 400
+    import requests
+    from datetime import datetime
+    from flask import request, jsonify
 
-    service_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
-    endpoint = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
+    year = request.args.get("year", type=int, default=datetime.now().year)
+
+    api_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
+    base_url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
+
     holidays = []
 
     for month in range(1, 13):
         params = {
-            "solYear": year,
-            "solMonth": f"{month:02}",
-            "ServiceKey": service_key,
+            "ServiceKey": api_key,
+            "solYear": str(year),
+            "solMonth": f"{month:02d}",
             "_type": "json"
         }
 
         try:
-            res = requests.get(endpoint, params=params, timeout=5)
+            res = requests.get(base_url, params=params)
             res.raise_for_status()
             data = res.json()
 
             items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
 
-            if not items:
-                continue
-
-            if isinstance(items, dict):
+            if isinstance(items, dict):  # 단일 공휴일일 경우
                 items = [items]
 
             for h in items:
                 locdate = str(h.get("locdate", ""))
-                date_name = h.get("dateName", "")
-                if len(locdate) == 8 and date_name:
-                    holidays.append({
-                        "date": f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:8]}",
-                        "description": date_name
-                    })
+                date_obj = datetime.strptime(locdate, "%Y%m%d")
+                date_str = date_obj.strftime("%Y-%m-%d")
+
+                holidays.append({
+                    "date": date_str,
+                    "description": h.get("dateName", "")
+                })
+
         except Exception as e:
-            print(f"❗ {month}월 공공 공휴일 조회 실패:", e)
+            print(f"❗ {month}월 공휴일 요청 실패:", e)
 
     return jsonify(holidays)
+
 
 # ✅ [GET] /holidays?year=YYYY
 # 특정 연도의 공휴일 리스트를 조회하는 API
