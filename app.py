@@ -159,9 +159,11 @@ def download_database():
 
 import requests  # 맨 위에 없으면 꼭 추가
 
-from flask import request, jsonify
+from flask import Flask, request, jsonify
 import requests
 import xmltodict
+
+app = Flask(__name__)
 
 @app.route('/api/public-holidays')
 def get_public_holidays():
@@ -169,21 +171,21 @@ def get_public_holidays():
     if not year:
         return jsonify({"error": "Missing 'year' parameter"}), 400
 
-    # ✅ 디코딩된 일반 인증키 사용
+    # ✅ 디코딩된 인증키를 직접 사용 (브라우저와 동일한 형태)
     service_key = "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw=="
-    url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getHoliDeInfo"
+    base_url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getHoliDeInfo"
 
     holidays = []
 
     for month in range(1, 13):
-        params = {
-            'serviceKey': service_key,
-            'solYear': year,
-            'solMonth': f"{month:02d}"
-        }
+        # ✅ 전체 URL 직접 조합 (params 쓰지 않음)
+        full_url = (
+            f"{base_url}?serviceKey={service_key}"
+            f"&solYear={year}&solMonth={month:02d}"
+        )
 
         try:
-            response = requests.get(url, params=params)
+            response = requests.get(full_url)
             response.raise_for_status()
             data = xmltodict.parse(response.content)
 
@@ -192,7 +194,7 @@ def get_public_holidays():
                 items = [items]
 
             for item in items:
-                locdate = str(item.get('locdate'))  # e.g., 20251003
+                locdate = str(item.get('locdate'))  # e.g., "20251003"
                 dateName = item.get('dateName')
                 if locdate and dateName:
                     formatted_date = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
@@ -207,6 +209,7 @@ def get_public_holidays():
             continue
 
     return jsonify(holidays)
+
 
 
 
