@@ -10,7 +10,7 @@ print("✅ 현재 실행 중인 Python:", sys.executable)
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from collections import OrderedDict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from io import BytesIO
 import calendar
@@ -2138,13 +2138,12 @@ def download_pivot_excel():
     if not start or not end:
         return "start, end 날짜를 지정해주세요.", 400
 
-    # DB 연결
     conn = sqlite3.connect("db.sqlite")
 
-    # ✅ 직원(meals + employees) 데이터
+    # 직원 식사 신청 데이터 조회 (region 포함)
     query_meals = """
         SELECT m.date, m.breakfast, m.lunch, m.dinner,
-               e.name, e.dept, e.type
+               e.name, e.dept, e.type, e.region
         FROM meals m
         JOIN employees e ON m.user_id = e.id
         WHERE m.date BETWEEN ? AND ?
@@ -2152,19 +2151,25 @@ def download_pivot_excel():
     """
     df_meals = pd.read_sql_query(query_meals, conn, params=(start, end))
 
-    records_meals = []
+    # 데이터 분류
+    eco_center = []
+    tech_center = []
+
     for _, row in df_meals.iterrows():
+        base = [row["date"], row["name"], row["dept"]]
+        if row["type"] != "직영":
+            continue
+
+        target = eco_center if row["region"] == "에코센터" else tech_center
+
         if row["breakfast"] == 1:
-            records_meals.append([row["type"], row["date"], row["name"], row["dept"], "조식"])
+            target.append(base + ["조식"])
         if row["lunch"] == 1:
-            records_meals.append([row["type"], row["date"], row["name"], row["dept"], "중식"])
+            target.append(base + ["중식"])
         if row["dinner"] == 1:
-            records_meals.append([row["type"], row["date"], row["name"], row["dept"], "석식"])
+            target.append(base + ["석식"])
 
-    df_meals_final = pd.DataFrame(records_meals, columns=["구분", "식사일자", "이름", "부서", "식사 구분"])
-    df_meals_final["식사일자"] = pd.to_datetime(df_meals_final["식사일자"]).dt.strftime("%Y-%m-%d")
-
-    # ✅ 방문객(visitors + dept) 데이터
+    # 방문자/협력사 데이터
     query_visitors = """
         SELECT v.applicant_name, v.date, v.breakfast, v.lunch, v.dinner, v.type,
                e.dept
@@ -2176,28 +2181,35 @@ def download_pivot_excel():
     df_visitors = pd.read_sql_query(query_visitors, conn, params=(start, end))
     conn.close()
 
-    records_visitors = []
+    visitors_combined = []
     for _, row in df_visitors.iterrows():
+        base = [row["date"], row["type"], row["dept"]]
         if row["breakfast"] > 0:
-            records_visitors.append([row["type"], row["date"], row["dept"], row["breakfast"], "조식"])
+            visitors_combined.append(base + [row["breakfast"], "조식"])
         if row["lunch"] > 0:
-            records_visitors.append([row["type"], row["date"], row["dept"], row["lunch"], "중식"])
+            visitors_combined.append(base + [row["lunch"], "중식"])
         if row["dinner"] > 0:
-            records_visitors.append([row["type"], row["date"], row["dept"], row["dinner"], "석식"])
+            visitors_combined.append(base + [row["dinner"], "석식"])
 
-    df_visitors_final = pd.DataFrame(records_visitors, columns=["구분", "식사일자", "이름", "부서", "식사 구분"])
-    df_visitors_final["식사일자"] = pd.to_datetime(df_visitors_final["식사일자"]).dt.strftime("%Y-%m-%d")
-
-    # ✅ 엑셀 파일 생성 (시트 분리)
+    # 엑셀 저장
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df_meals_final.to_excel(writer, index=False, sheet_name="직원_식사신청")
-        df_visitors_final.to_excel(writer, index=False, sheet_name="방문객_신청요약")
+        pd.DataFrame(eco_center, columns=["식사일자", "이름", "부서", "식사 구분"])\
+            .to_excel(writer, index=False, sheet_name="직영_에코센터")
+
+        pd.DataFrame(tech_center, columns=["식사일자", "이름", "부서", "식사 구분"])\
+            .to_excel(writer, index=False, sheet_name="직영_출장")
+
+        pd.DataFrame(visitors_combined, columns=["식사일자", "구분", "부서", "인원수", "식사 구분"])\
+            .to_excel(writer, index=False, sheet_name="협력사_방문객")
 
     output.seek(0)
-
-    filename = f"meal_pivot_{start}_to_{end}.xlsx"
+    # ✅ 한국 시간(KST) 기준
+    kst = timezone(timedelta(hours=9))
+    now_str = datetime.now().strftime("%Y%m%d_%H%M")  # 💡 이 줄 추가!
+    filename = f"식수신청_피벗_{now_str}.xlsx"
     return send_file(output, download_name=filename, as_attachment=True)
+
 
 
 
