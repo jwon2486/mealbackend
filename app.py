@@ -2206,7 +2206,8 @@ def download_pivot_excel():
     output.seek(0)
     # ✅ 한국 시간(KST) 기준
     kst = timezone(timedelta(hours=9))
-    now_str = datetime.now().strftime("%Y%m%d_%H%M")  # 💡 이 줄 추가!
+    now_str = datetime.now(kst).strftime("%Y%m%d_%H%M")
+
     filename = f"식수신청_피벗_{now_str}.xlsx"
     return send_file(output, download_name=filename, as_attachment=True)
 
