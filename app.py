@@ -2140,7 +2140,7 @@ def download_pivot_excel():
 
     conn = sqlite3.connect("db.sqlite")
 
-    # 직원 식사 신청 데이터 조회 (region 포함)
+    # 직원 식사 신청 데이터
     query_meals = """
         SELECT m.date, m.breakfast, m.lunch, m.dinner,
                e.name, e.dept, e.type, e.region
@@ -2151,7 +2151,6 @@ def download_pivot_excel():
     """
     df_meals = pd.read_sql_query(query_meals, conn, params=(start, end))
 
-    # 데이터 분류
     eco_center = []
     tech_center = []
 
@@ -2169,10 +2168,10 @@ def download_pivot_excel():
         if row["dinner"] == 1:
             target.append(base + ["석식"])
 
-    # 방문자/협력사 데이터
+    # ✅ 방문자/협력사 데이터 조회
     query_visitors = """
         SELECT v.applicant_name, v.date, v.breakfast, v.lunch, v.dinner, v.type,
-               e.dept
+               e.dept, e.type as emp_type
         FROM visitors v
         LEFT JOIN employees e ON v.applicant_id = e.id
         WHERE v.date BETWEEN ? AND ?
@@ -2181,17 +2180,27 @@ def download_pivot_excel():
     df_visitors = pd.read_sql_query(query_visitors, conn, params=(start, end))
     conn.close()
 
-    visitors_combined = []
+    # ✅ 구분된 리스트 초기화
+    visitor_direct = []   # 직영 직원이 신청한 방문객
+    visitor_others = []   # 협력사 및 방문자 신청 인원수
+
     for _, row in df_visitors.iterrows():
         base = [row["date"], row["type"], row["dept"]]
-        if row["breakfast"] > 0:
-            visitors_combined.append(base + [row["breakfast"], "조식"])
-        if row["lunch"] > 0:
-            visitors_combined.append(base + [row["lunch"], "중식"])
-        if row["dinner"] > 0:
-            visitors_combined.append(base + [row["dinner"], "석식"])
+        emp_type = row["emp_type"]  # 신청자 본인의 타입
 
-    # 엑셀 저장
+        def append_if_positive(meal_type, count):
+            if count > 0:
+                row_data = base + [count, meal_type]
+                if emp_type == "직영":
+                    visitor_direct.append(row_data)
+                else:
+                    visitor_others.append(row_data)
+
+        append_if_positive("조식", row["breakfast"])
+        append_if_positive("중식", row["lunch"])
+        append_if_positive("석식", row["dinner"])
+
+    # ✅ 엑셀 생성
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         pd.DataFrame(eco_center, columns=["식사일자", "이름", "부서", "식사 구분"])\
@@ -2200,8 +2209,19 @@ def download_pivot_excel():
         pd.DataFrame(tech_center, columns=["식사일자", "이름", "부서", "식사 구분"])\
             .to_excel(writer, index=False, sheet_name="직영_출장")
 
-        pd.DataFrame(visitors_combined, columns=["식사일자", "구분", "부서", "인원수", "식사 구분"])\
-            .to_excel(writer, index=False, sheet_name="협력사_방문객")
+        # 시트 작성: 협력사_방문객
+        sheetname = "협력사_방문객"
+        wb = writer.book
+        df_direct = pd.DataFrame(visitor_direct, columns=["식사일자", "구분", "부서", "인원수", "식사 구분"])
+        df_others = pd.DataFrame(visitor_others, columns=["식사일자", "구분", "부서", "인원수", "식사 구분"])
+
+        # 첫 번째 블록 작성
+        df_direct.to_excel(writer, index=False, sheet_name=sheetname, startrow=0)
+        ws = writer.sheets[sheetname]
+
+        # 빈 줄 이후 두 번째 블록 작성
+        gap = len(df_direct) + 2
+        df_others.to_excel(writer, index=False, sheet_name=sheetname, startrow=gap)
 
     output.seek(0)
     # ✅ 한국 시간(KST) 기준
@@ -2210,6 +2230,7 @@ def download_pivot_excel():
 
     filename = f"식수신청_피벗_{now_str}.xlsx"
     return send_file(output, download_name=filename, as_attachment=True)
+
 
 
 
