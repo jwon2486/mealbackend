@@ -10,7 +10,7 @@ print("✅ 현재 실행 중인 Python:", sys.executable)
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from collections import OrderedDict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from collections import defaultdict
 from io import BytesIO
 import calendar
@@ -2490,65 +2490,76 @@ def check_visitor_duplicate():
 
 @app.route("/visitors/<int:visitor_id>", methods=["PUT"])
 def update_visitor(visitor_id):
+    """
+    ▸ 프런트가 보낸 필드만 수정하고,
+    ▸ 보내지 않은 식사 / reason 값은 그대로 유지한다.
+    """
     try:
-        data = request.json
-        breakfast = int(data.get("breakfast", 0))
-        lunch = int(data.get("lunch", 0))
-        dinner = int(data.get("dinner", 0))
-        reason = data.get("reason", "").strip()
+        data = request.json or {}                       # ① 요청 JSON (없으면 빈 dict)
 
-        if (breakfast + lunch + dinner) == 0 or reason == "":
-            return jsonify({"error": "입력 값 부족"}), 400
-
+        # ② 기존 레코드 조회 ───────────────────────────────
         with sqlite3.connect(DATABASE) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            # ✅ 기존 값 조회
-            cursor.execute("SELECT * FROM visitors WHERE id = ?", (visitor_id,))
-            original = cursor.fetchone()
-
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM visitors WHERE id = ?", (visitor_id,))
+            original = cur.fetchone()
             if not original:
                 return jsonify({"error": "신청 내역 없음"}), 404
 
-            old_b, old_l, old_d = original["breakfast"], original["lunch"], original["dinner"]
+        old_b, old_l, old_d = original["breakfast"], original["lunch"], original["dinner"]
 
-            # 🔧 수정 후 코드
-            # ✅ 변경사항이 있고 + 금주(월~금)일 경우만 로그 기록
-            this_day = datetime.strptime(original["date"], "%Y-%m-%d").date()
-            today = datetime.today().date()
-            monday = today - timedelta(days=today.weekday())
-            friday = monday + timedelta(days=4)
+        # ③ “보낸 필드만” 새 값 계산 ──────────────────────
+        new_b = int(data["breakfast"]) if "breakfast" in data else old_b
+        new_l = int(data["lunch"])     if "lunch"     in data else old_l
+        new_d = int(data["dinner"])    if "dinner"    in data else old_d
+        new_reason = data.get("reason", original["reason"]).strip()
 
-            
-            
-            # ✅ 값이 변경된 경우 로그 기록
-            if (monday <= this_day <= friday) and (
-                old_b != breakfast or old_l != lunch or old_d != dinner
-            ):
-                cursor.execute("""
+        # ④ 입력 검증 (해당 키가 있을 때만) ───────────────
+        if "reason" in data and new_reason == "":
+            return jsonify({"error": "사유를 입력하세요"}), 400
+        if {"breakfast", "lunch", "dinner"} & data.keys() and (new_b + new_l + new_d) == 0:
+            return jsonify({"error": "모든 수량이 0입니다"}), 400
+
+        # ⑤ UPDATE 구문 동적 생성 ────────────────────────
+        fields, params = [], []
+        for col, val in [("breakfast", new_b), ("lunch", new_l), ("dinner", new_d)]:
+            if col in data:                               # 실제로 전송된 컬럼만
+                fields.append(f"{col} = ?")
+                params.append(val)
+        if "reason" in data:                              # reason도 선택 업데이트
+            fields.append("reason = ?")
+            params.append(new_reason)
+
+        # 전송된 필드가 아무것도 없으면 “변경 없음”
+        if not fields:
+            return jsonify({"message": "변경 없음"}), 200
+
+        fields.append("last_modified = CURRENT_TIMESTAMP")
+        params.append(visitor_id)
+
+        # ⑥ DB 반영 및 로그 기록 ─────────────────────────
+        with sqlite3.connect(DATABASE) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(f"UPDATE visitors SET {', '.join(fields)} WHERE id = ?", params)
+
+            # 금주(월~금) & 실제 값 변경 시에만 로그 저장
+            today = date.today()
+            this_weekday = today.weekday()  # 0=월 … 4=금
+            changed = (old_b != new_b) or (old_l != new_l) or (old_d != new_d)
+            if changed and this_weekday <= 4:
+                cur.execute("""
                     INSERT INTO visitor_logs (
-                        applicant_id, applicant_name, date, reason, type,
+                        applicant_id, applicant_name, date, type, reason,
                         before_breakfast, before_lunch, before_dinner,
                         breakfast, lunch, dinner
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    original["applicant_id"],
-                    original["applicant_name"],
-                    original["date"],
-                    reason,
-                    original["type"],
-                    old_b, old_l, old_d,
-                    breakfast, lunch, dinner
+                    original["applicant_id"], original["applicant_name"],
+                    original["date"], original["type"], new_reason,
+                    old_b, old_l, old_d, new_b, new_l, new_d
                 ))
-
-            # ✅ DB 업데이트
-            cursor.execute("""
-                UPDATE visitors
-                SET breakfast = ?, lunch = ?, dinner = ?, reason = ?, last_modified = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """, (breakfast, lunch, dinner, reason, visitor_id))
 
             conn.commit()
 
