@@ -7,7 +7,7 @@
 import sys
 print("✅ 현재 실행 중인 Python:", sys.executable)
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, session
 from flask_cors import CORS
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
@@ -387,8 +387,53 @@ def save_meals():
     except Exception as e:
         print("❌ 식수 저장 실패:", e)
         return jsonify({"error": str(e)}), 500
+    
 
+    
 
+#본인 확인 여부 서버에서 조회하는 GET코드
+@app.route('/selfcheck', methods=['GET'])
+def get_selfcheck():
+    user_id = session.get('user_id')
+    date = request.args.get('date')
+
+    if not user_id or not date:
+        return jsonify({'error': 'Missing session or date'}), 400
+
+    conn = get_db_connection()
+    row = conn.execute(
+        'SELECT checked FROM selfcheck WHERE user_id = ? AND date = ?',
+        (user_id, date)
+    ).fetchone()
+    conn.close()
+
+    return jsonify({'checked': row['checked'] if row else 0})
+
+#본인 확인 체크박스 상태를 서버로 전송하는 함수
+@app.route('/selfcheck', methods=['POST'])
+def post_selfcheck():
+    user_id = session.get('user_id')
+    data = request.get_json()
+    date = data.get('date')
+    checked = int(data.get('checked', 0))
+
+    if not user_id or not date:
+        return jsonify({'error': 'Missing session or date'}), 400
+
+    conn = get_db_connection()
+    conn.execute(
+        '''
+        INSERT INTO selfcheck (user_id, date, checked)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id, date)
+        DO UPDATE SET checked = excluded.checked
+        ''',
+        (user_id, date, checked)
+    )
+    conn.commit()
+    conn.close()
+
+    return jsonify({'message': 'Self-check saved successfully'})
 
 # ✅ [POST] /update_meals
 # 관리자 페이지에서 전체 직원 식수 데이터를 수정/저장하는 API
@@ -1993,6 +2038,7 @@ def weekly_dept_stats():
 #     filename = f"weekly_dept_{start}_to_{end}.xlsx"
 #     return send_file(output, as_attachment=True, download_name=filename,
 #                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 @app.route("/admin/stats/weekly_dept/excel")
 def weekly_dept_excel():
