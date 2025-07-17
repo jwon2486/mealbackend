@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 
 # 모든 도메인에서 CORS 허용 (프론트엔드가 localhost:3000 등에 있어도 접근 가능)
-CORS(app, supports_credentials=True, origins=["https://mealfrontend.onrender.com"]) #프론트와 연동
+CORS(app) #프론트와 연동
 
 # ✅ SQLite 데이터베이스 연결 함수
 def get_db_connection():
