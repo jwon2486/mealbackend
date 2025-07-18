@@ -1550,7 +1550,7 @@ def weekly_dept_stats():
     #자가확인 여부를 프론트로 내보내는 함수
     @app.route('/selfcheck', methods=['POST'])
     def post_selfcheck():
-        data = request.get_json()
+        data = request.get_json(force=True)
         user_id = data["user_id"]
         date = data["date"]
         checked = data["checked"]
