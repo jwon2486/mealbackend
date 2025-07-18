@@ -413,28 +413,35 @@ def get_selfcheck():
 #본인 확인 체크박스 상태를 서버로 전송하는 함수
 @app.route('/selfcheck', methods=['POST'])
 def post_selfcheck():
-    user_id = session.get('user_id')
-    data = request.get_json()
-    date = data.get('date')
-    checked = int(data.get('checked', 0))
+    user_id = request.json.get('user_id')  # ✅ 수정
+    date = request.json.get('date')
+    checked = request.json.get('checked')
 
     if not user_id or not date:
         return jsonify({'error': 'Missing session or date'}), 400
 
     conn = get_db_connection()
-    conn.execute(
-        '''
-        INSERT INTO selfcheck (user_id, date, checked)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id, date)
-        DO UPDATE SET checked = excluded.checked
-        ''',
-        (user_id, date, checked)
-    )
+    # 기존 값 있는지 확인
+    existing = conn.execute(
+        'SELECT 1 FROM selfcheck WHERE user_id = ? AND date = ?',
+        (user_id, date)
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            'UPDATE selfcheck SET checked = ? WHERE user_id = ? AND date = ?',
+            (checked, user_id, date)
+        )
+    else:
+        conn.execute(
+            'INSERT INTO selfcheck (user_id, date, checked) VALUES (?, ?, ?)',
+            (user_id, date, checked)
+        )
     conn.commit()
     conn.close()
 
-    return jsonify({'message': 'Self-check saved successfully'})
+    return jsonify({'status': 'success'})
+
 
 # ✅ [POST] /update_meals
 # 관리자 페이지에서 전체 직원 식수 데이터를 수정/저장하는 API
