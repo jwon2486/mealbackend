@@ -1531,7 +1531,41 @@ def weekly_dept_stats():
             "total": len(ids),
             "days": {}
         }
+    
+    #자가 확인 여부를 프론트에서 받아오는 함수
+    @app.route('/selfcheck', methods=['GET'])
+    def get_selfcheck():
+        user_id = request.args.get('user_id')
+        date = request.args.get('date')
 
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT checked FROM selfcheck WHERE user_id = ? AND date = ?", (user_id, date))
+        row = cur.fetchone()
+        conn.close()
+
+        return jsonify({"checked": row["checked"] if row else 0})
+    
+
+    #자가확인 여부를 프론트로 내보내는 함수
+    @app.route('/selfcheck', methods=['POST'])
+    def post_selfcheck():
+        data = request.get_json()
+        user_id = data["user_id"]
+        date = data["date"]
+        checked = data["checked"]
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO selfcheck (user_id, date, checked)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, date) DO UPDATE SET checked = excluded.checked
+        """, (user_id, date, checked))
+        conn.commit()
+        conn.close()
+
+        return jsonify({"status": "ok"})
 
     # ✅ 4. meals 테이블 데이터 조회
     cursor.execute("""
