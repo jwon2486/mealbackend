@@ -394,7 +394,7 @@ def save_meals():
 #본인 확인 여부 서버에서 조회하는 GET코드
 @app.route('/selfcheck', methods=['GET'])
 def get_selfcheck():
-    user_id = session.get('user_id')
+    user_id = request.args.get('user_id')  # ✅ 세션 대신 URL 파라미터에서 받음
     date = request.args.get('date')
 
     if not user_id or not date:
@@ -408,6 +408,7 @@ def get_selfcheck():
     conn.close()
 
     return jsonify({'checked': row['checked'] if row else 0})
+
 
 #본인 확인 체크박스 상태를 서버로 전송하는 함수
 @app.route('/selfcheck', methods=['POST'])
