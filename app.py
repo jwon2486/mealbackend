@@ -555,6 +555,7 @@ def admin_get_meals():
                 FROM employees e
                 LEFT JOIN meals m
                     ON e.id = m.user_id AND m.date BETWEEN ? AND ?
+                WHERE e.type = '직영'
                 ORDER BY e.dept ASC, e.name ASC, m.date ASC
             """, (start, end))
         else:
@@ -571,6 +572,7 @@ def admin_get_meals():
                 FROM meals m
                 JOIN employees e ON m.user_id = e.id
                 WHERE m.date BETWEEN ? AND ?
+                AND e.type = '직영'
                 ORDER BY e.dept ASC, e.name ASC, m.date ASC
             """, (start, end))
 
