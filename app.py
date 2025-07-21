@@ -140,6 +140,19 @@ def init_db():
     conn.commit()
     conn.close()
 
+def is_expired(meal_type, date_str):
+    from datetime import datetime
+    meal_date = datetime.strptime(date_str, "%Y-%m-%d")
+    now = datetime.now()
+
+    if meal_type == '점심':
+        deadline = meal_date.replace(hour=9, minute=0)
+    elif meal_type == '저녁':
+        deadline = meal_date.replace(hour=14, minute=0)
+    else:
+        return True
+
+    return now > deadline
 
 def is_this_week(date_str):
     try:
@@ -1540,40 +1553,7 @@ def weekly_dept_stats():
             "days": {}
         }
     
-    #자가 확인 여부를 프론트에서 받아오는 함수
-    @app.route('/selfcheck', methods=['GET'])
-    def get_selfcheck():
-        user_id = request.args.get('user_id')
-        date = request.args.get('date')
-
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT checked FROM selfcheck WHERE user_id = ? AND date = ?", (user_id, date))
-        row = cur.fetchone()
-        conn.close()
-
-        return jsonify({"checked": row["checked"] if row else 0})
     
-
-    #자가확인 여부를 프론트로 내보내는 함수
-    @app.route('/selfcheck', methods=['POST'])
-    def post_selfcheck():
-        data = request.get_json(force=True)
-        user_id = data["user_id"]
-        date = data["date"]
-        checked = data["checked"]
-
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO selfcheck (user_id, date, checked)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id, date) DO UPDATE SET checked = excluded.checked
-        """, (user_id, date, checked))
-        conn.commit()
-        conn.close()
-
-        return jsonify({"status": "ok"})
 
     # ✅ 4. meals 테이블 데이터 조회
     cursor.execute("""
@@ -2405,20 +2385,6 @@ def save_visitors():
     except Exception as e:
         print("❌ save_visitors 오류:", e)
         return jsonify({"error": "저장 실패"}), 500
-
-def is_expired(meal_type, date_str):
-    from datetime import datetime
-    meal_date = datetime.strptime(date_str, "%Y-%m-%d")
-    now = datetime.now()
-
-    if meal_type == '점심':
-        deadline = meal_date.replace(hour=9, minute=0)
-    elif meal_type == '저녁':
-        deadline = meal_date.replace(hour=14, minute=0)
-    else:
-        return True
-
-    return now > deadline
 
 
 # ✅ [3] GET /visitors - 신청 현황 조회
