@@ -2406,6 +2406,21 @@ def save_visitors():
         print("❌ save_visitors 오류:", e)
         return jsonify({"error": "저장 실패"}), 500
 
+def is_expired(meal_type, date_str):
+    from datetime import datetime
+    meal_date = datetime.strptime(date_str, "%Y-%m-%d")
+    now = datetime.now()
+
+    if meal_type == '점심':
+        deadline = meal_date.replace(hour=9, minute=0)
+    elif meal_type == '저녁':
+        deadline = meal_date.replace(hour=14, minute=0)
+    else:
+        return True
+
+    return now > deadline
+
+
 # ✅ [3] GET /visitors - 신청 현황 조회
 @app.route("/visitors", methods=["GET"])
 def get_visitors():
