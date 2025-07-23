@@ -135,7 +135,14 @@ def init_db():
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
     """)
-        
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS selfcheck (
+        user_id TEXT NOT NULL,
+        date TEXT NOT NULL,
+        checked INTEGER DEFAULT 0,
+        PRIMARY KEY (user_id, date)
+    )
+    """)
 
     conn.commit()
     conn.close()
@@ -417,7 +424,7 @@ def get_admin_selfchecks():
     query = """
     SELECT user_id, MAX(checked) AS checked
     FROM selfcheck
-    WHERE date BETWEEN %s AND %s
+    WHERE date BETWEEN ? AND ?
     GROUP BY user_id
     """
     cursor.execute(query, (start_date, end_date))
