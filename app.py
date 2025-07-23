@@ -402,7 +402,30 @@ def save_meals():
         return jsonify({"error": str(e)}), 500
     
 
-    
+#관리자 페이지용 selfcheck 코드
+@app.route('/admin/selfcheck', methods=['GET'])
+def get_admin_selfchecks():
+    start_date = request.args.get('start')
+    end_date = request.args.get('end')
+
+    if not start_date or not end_date:
+        return jsonify({ "error": "start 와 end 파라미터가 필요합니다." }), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = """
+        SELECT user_id, MAX(checked) as checked
+        FROM selfcheck
+        WHERE date BETWEEN %s AND %s
+        GROUP BY user_id
+    """
+    cursor.execute(query, (start_date, end_date))
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = { str(row[0]): int(row[1]) for row in rows }
+    return jsonify(result)
 
 #본인 확인 여부 서버에서 조회하는 GET코드
 @app.route('/selfcheck', methods=['GET'])
