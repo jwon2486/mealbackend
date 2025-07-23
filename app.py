@@ -415,10 +415,10 @@ def get_admin_selfchecks():
     cursor = conn.cursor()
 
     query = """
-        SELECT user_id, MAX(checked) as checked
-        FROM selfcheck
-        WHERE date BETWEEN %s AND %s
-        GROUP BY user_id
+    SELECT user_id, MAX(checked) AS checked
+    FROM selfcheck
+    WHERE date BETWEEN %s AND %s
+    GROUP BY user_id
     """
     cursor.execute(query, (start_date, end_date))
     rows = cursor.fetchall()
