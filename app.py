@@ -485,6 +485,53 @@ def post_selfcheck():
 
     return jsonify({'status': 'success'})
 
+@app.route("/checkPreviousWeek", methods=["GET"])
+def check_previous_week():
+    user_id = request.args.get("user_id")
+    selected_week_start = request.args.get("date")
+
+    if not user_id or not selected_week_start:
+        return jsonify({"error": "user_id와 date는 필수입니다."}), 400
+
+    try:
+        selected_monday = datetime.strptime(selected_week_start, "%Y-%m-%d").date()
+        prev_monday = selected_monday - timedelta(days=7)
+        prev_friday = prev_monday + timedelta(days=4)
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # ✅ 이전 주 식사 신청 여부
+        cursor.execute("""
+            SELECT COUNT(*) 
+            FROM meals
+            WHERE user_id = ?
+              AND date BETWEEN ? AND ?
+              AND (breakfast = 1 OR lunch = 1 OR dinner = 1)
+        """, (user_id, prev_monday.isoformat(), prev_friday.isoformat()))
+        meal_count = cursor.fetchone()[0]
+        has_meal = meal_count > 0
+
+        # ✅ 이전 주 본인확인 체크 여부
+        cursor.execute("""
+            SELECT COUNT(*) 
+            FROM selfcheck
+            WHERE user_id = ?
+              AND date BETWEEN ? AND ?
+              AND checked = 1
+        """, (user_id, prev_monday.isoformat(), prev_friday.isoformat()))
+        selfcheck_count = cursor.fetchone()[0]
+        has_selfcheck = selfcheck_count > 0
+
+        conn.close()
+
+        return jsonify({
+            "hasMeal": has_meal,
+            "hasSelfCheck": has_selfcheck
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ✅ [POST] /update_meals
 # 관리자 페이지에서 전체 직원 식수 데이터를 수정/저장하는 API
