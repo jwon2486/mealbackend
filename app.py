@@ -7,24 +7,28 @@
 import sys
 print("✅ 현재 실행 중인 Python:", sys.executable)
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, session
 from flask_cors import CORS
 from collections import OrderedDict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from collections import defaultdict
-from flask import send_file
 from io import BytesIO
-from datetime import datetime
 import calendar
 import sqlite3
 import pandas as pd
 import os
 import re
 import shutil  # ✅ DB 파일 복사용
+import xmltodict
+import requests
+import ssl
+from requests.adapters import HTTPAdapter
+
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE = os.path.join(BASE_DIR, "db.sqlite")
+DB_PATH = "db.sqlite"
 
 # Flask 앱 생성
 app = Flask(__name__)
@@ -131,11 +135,31 @@ def init_db():
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
     """)
-        
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS selfcheck (
+        user_id TEXT NOT NULL,
+        date TEXT NOT NULL,
+        checked INTEGER DEFAULT 0,
+        PRIMARY KEY (user_id, date)
+    )
+    """)
 
     conn.commit()
     conn.close()
 
+def is_expired(meal_type, date_str):
+    from datetime import datetime
+    meal_date = datetime.strptime(date_str, "%Y-%m-%d")
+    now = datetime.now()
+
+    if meal_type == '점심':
+        deadline = meal_date.replace(hour=9, minute=0)
+    elif meal_type == '저녁':
+        deadline = meal_date.replace(hour=14, minute=0)
+    else:
+        return True
+
+    return now > deadline
 
 def is_this_week(date_str):
     try:
@@ -155,6 +179,111 @@ def download_database():
         return send_file(db_path, as_attachment=True)
     else:
         return "DB 파일이 존재하지 않습니다.", 404
+
+
+
+
+
+# SSL 오류 우회를 위한 requests 어댑터 클래스
+class SSLAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context()
+        ctx.set_ciphers("DEFAULT@SECLEVEL=1")
+        kwargs['ssl_context'] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
+# 지정된 연도(year)에 대해 공휴일 API를 갱신해야 하는지 판단 (7일 경과 여부 확인)
+def should_refresh_public_holidays(year):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS public_holiday_meta (year INTEGER PRIMARY KEY, last_checked TEXT)")
+    cur.execute("SELECT last_checked FROM public_holiday_meta WHERE year = ?", (year,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return True
+    last_checked = datetime.fromisoformat(row[0])
+    return (datetime.now() - last_checked).days >= 7
+
+# 해당 연도(year)의 공휴일 데이터를 최신으로 갱신한 시각을 기록
+def update_last_checked(year):
+    now_str = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO public_holiday_meta (year, last_checked)
+        VALUES (?, ?)
+        ON CONFLICT(year) DO UPDATE SET last_checked = excluded.last_checked
+    """, (year, now_str))
+    conn.commit()
+    conn.close()
+
+# 📌 공공 API 또는 DB 캐시를 활용하여 지정 연도의 공휴일 목록을 반환하는 엔드포인트
+@app.route("/api/public-holidays")
+def get_public_holidays():
+    year = request.args.get("year", default=datetime.now().year, type=int)
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS public_holidays (
+            date TEXT PRIMARY KEY,
+            description TEXT,
+            source TEXT
+        )
+    """)
+    conn.commit()
+
+    if should_refresh_public_holidays(year):
+        session = requests.Session()
+        session.mount("https://", SSLAdapter())
+
+        for month in range(1, 13):
+            url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
+            params = {
+                "serviceKey": "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw==",
+                "solYear": str(year),
+                "solMonth": f"{month:02d}"
+            }
+            try:
+                response = session.get(url, params=params, timeout=10)
+                data = xmltodict.parse(response.text)
+                items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+
+                if isinstance(items, dict):
+                    items = [items]
+
+                for item in items:
+                    locdate = item.get("locdate")
+                    desc = item.get("dateName")
+                    if locdate and desc:
+                        formatted = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
+                        try:
+                            cur.execute("INSERT OR IGNORE INTO public_holidays (date, description, source) VALUES (?, ?, ?)",
+                                        (formatted, desc, "api"))
+                        except Exception as e:
+                            print(f"❌ DB 삽입 실패: {formatted}, {desc}, error={e}")
+
+            except Exception as e:
+                print(f"❌ {month}월 공공 공휴일 호출 실패: {e}")
+
+        conn.commit()
+        update_last_checked(year)
+
+    cur.execute("SELECT date, description, source FROM public_holidays WHERE substr(date, 1, 4) = ?", (str(year),))
+    holidays = [{"date": row[0], "description": row[1], "source": row[2]} for row in cur.fetchall()]
+    conn.close()
+
+    return jsonify(holidays)
+
+
+
+
+
+
+
+
 
 # ✅ [GET] /holidays?year=YYYY
 # 특정 연도의 공휴일 리스트를 조회하는 API
@@ -278,7 +407,83 @@ def save_meals():
     except Exception as e:
         print("❌ 식수 저장 실패:", e)
         return jsonify({"error": str(e)}), 500
+    
 
+#관리자 페이지용 selfcheck 코드
+@app.route('/admin/selfcheck', methods=['GET'])
+def get_admin_selfchecks():
+    start_date = request.args.get('start')
+    end_date = request.args.get('end')
+
+    if not start_date or not end_date:
+        return jsonify({ "error": "start 와 end 파라미터가 필요합니다." }), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = """
+    SELECT user_id, MAX(checked) AS checked
+    FROM selfcheck
+    WHERE date BETWEEN ? AND ?
+    GROUP BY user_id
+    """
+    cursor.execute(query, (start_date, end_date))
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = { str(row[0]): int(row[1]) for row in rows }
+    return jsonify(result)
+
+#본인 확인 여부 서버에서 조회하는 GET코드
+@app.route('/selfcheck', methods=['GET'])
+def get_selfcheck():
+    user_id = request.args.get('user_id')  # ✅ 세션 대신 URL 파라미터에서 받음
+    date = request.args.get('date')
+
+    if not user_id or not date:
+        return jsonify({'error': 'Missing session or date'}), 400
+
+    conn = get_db_connection()
+    row = conn.execute(
+        'SELECT checked FROM selfcheck WHERE user_id = ? AND date = ?',
+        (user_id, date)
+    ).fetchone()
+    conn.close()
+
+    return jsonify({'checked': row['checked'] if row else 0})
+
+
+#본인 확인 체크박스 상태를 서버로 전송하는 함수
+@app.route('/selfcheck', methods=['POST'])
+def post_selfcheck():
+    user_id = request.json.get('user_id')  # ✅ 수정
+    date = request.json.get('date')
+    checked = request.json.get('checked')
+
+    if not user_id or not date:
+        return jsonify({'error': 'Missing session or date'}), 400
+
+    conn = get_db_connection()
+    # 기존 값 있는지 확인
+    existing = conn.execute(
+        'SELECT 1 FROM selfcheck WHERE user_id = ? AND date = ?',
+        (user_id, date)
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            'UPDATE selfcheck SET checked = ? WHERE user_id = ? AND date = ?',
+            (checked, user_id, date)
+        )
+    else:
+        conn.execute(
+            'INSERT INTO selfcheck (user_id, date, checked) VALUES (?, ?, ?)',
+            (user_id, date, checked)
+        )
+    conn.commit()
+    conn.close()
+
+    return jsonify({'status': 'success'})
 
 
 # ✅ [POST] /update_meals
@@ -380,6 +585,7 @@ def admin_get_meals():
                 FROM employees e
                 LEFT JOIN meals m
                     ON e.id = m.user_id AND m.date BETWEEN ? AND ?
+                WHERE e.type = '직영'
                 ORDER BY e.dept ASC, e.name ASC, m.date ASC
             """, (start, end))
         else:
@@ -396,6 +602,7 @@ def admin_get_meals():
                 FROM meals m
                 JOIN employees e ON m.user_id = e.id
                 WHERE m.date BETWEEN ? AND ?
+                AND e.type = '직영'
                 ORDER BY e.dept ASC, e.name ASC, m.date ASC
             """, (start, end))
 
@@ -1251,7 +1458,6 @@ def download_dept_summary_excel():
     conn.close()
 
     # ✅ 통합 집계
-    from collections import defaultdict
     summary = defaultdict(lambda: {"breakfast": 0, "lunch": 0, "dinner": 0})
 
     for row in meal_rows + visitor_rows:
@@ -1270,7 +1476,6 @@ def download_dept_summary_excel():
     # ✅ DataFrame 구성
     import pandas as pd
     from io import BytesIO
-    from flask import send_file
 
     result = []
     for (dept, t), meals in summary.items():
@@ -1379,7 +1584,8 @@ def weekly_dept_stats():
             "total": len(ids),
             "days": {}
         }
-
+    
+    
 
     # ✅ 4. meals 테이블 데이터 조회
     cursor.execute("""
@@ -1887,6 +2093,7 @@ def weekly_dept_stats():
 #     return send_file(output, as_attachment=True, download_name=filename,
 #                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+
 @app.route("/admin/stats/weekly_dept/excel")
 def weekly_dept_excel():
 
@@ -2022,7 +2229,107 @@ def weekly_dept_excel():
     filename = f"weekly_dept_{start}_to_{end}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+# 피벗엑셀 테스트용 코드
+@app.route("/admin/stats/pivot_excel")
+def download_pivot_excel():
+    start = request.args.get("start")
+    end = request.args.get("end")
 
+    if not start or not end:
+        return "start, end 날짜를 지정해주세요.", 400
+
+    conn = sqlite3.connect("db.sqlite")
+
+    # 직원 식사 신청 데이터
+    query_meals = """
+        SELECT m.date, m.breakfast, m.lunch, m.dinner,
+               e.name, e.dept, e.type, e.region
+        FROM meals m
+        JOIN employees e ON m.user_id = e.id
+        WHERE m.date BETWEEN ? AND ?
+        ORDER BY m.date, e.name
+    """
+    df_meals = pd.read_sql_query(query_meals, conn, params=(start, end))
+
+    eco_center = []
+    tech_center = []
+
+    for _, row in df_meals.iterrows():
+        base = [row["date"], row["name"], row["dept"]]
+        if row["type"] != "직영":
+            continue
+
+        target = eco_center if row["region"] == "에코센터" else tech_center
+
+        if row["breakfast"] == 1:
+            target.append(base + ["조식"])
+        if row["lunch"] == 1:
+            target.append(base + ["중식"])
+        if row["dinner"] == 1:
+            target.append(base + ["석식"])
+
+    # ✅ 방문자/협력사 데이터 조회
+    query_visitors = """
+        SELECT v.applicant_name, v.date, v.breakfast, v.lunch, v.dinner, v.type,
+               e.dept, e.type as emp_type
+        FROM visitors v
+        LEFT JOIN employees e ON v.applicant_id = e.id
+        WHERE v.date BETWEEN ? AND ?
+        ORDER BY v.date, v.applicant_name
+    """
+    df_visitors = pd.read_sql_query(query_visitors, conn, params=(start, end))
+    conn.close()
+
+    # ✅ 구분된 리스트 초기화
+    visitor_direct = []   # 직영 직원이 신청한 방문객
+    visitor_others = []   # 협력사 및 방문자 신청 인원수
+
+    for _, row in df_visitors.iterrows():
+        base = [row["date"], row["type"], row["dept"]]
+        emp_type = row["emp_type"]  # 신청자 본인의 타입
+
+        def append_if_positive(meal_type, count):
+            if count > 0:
+                row_data = base + [count, meal_type]
+                if emp_type == "직영":
+                    visitor_direct.append(row_data)
+                else:
+                    visitor_others.append(row_data)
+
+        append_if_positive("조식", row["breakfast"])
+        append_if_positive("중식", row["lunch"])
+        append_if_positive("석식", row["dinner"])
+
+    # ✅ 엑셀 생성
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        pd.DataFrame(eco_center, columns=["식사일자", "이름", "부서", "식사 구분"])\
+            .to_excel(writer, index=False, sheet_name="직영_에코센터")
+
+        pd.DataFrame(tech_center, columns=["식사일자", "이름", "부서", "식사 구분"])\
+            .to_excel(writer, index=False, sheet_name="직영_출장")
+
+        # 시트 작성: 협력사_방문객
+        sheetname = "협력사_방문객"
+        wb = writer.book
+        df_direct = pd.DataFrame(visitor_direct, columns=["식사일자", "구분", "부서", "인원수", "식사 구분"])
+        df_others = pd.DataFrame(visitor_others, columns=["식사일자", "구분", "부서", "인원수", "식사 구분"])
+
+        # 첫 번째 블록 작성
+        df_direct.to_excel(writer, index=False, sheet_name=sheetname, startrow=0)
+        ws = writer.sheets[sheetname]
+
+        # 빈 줄 이후 두 번째 블록 작성
+        gap = len(df_direct) + 2
+        df_others.to_excel(writer, index=False, sheet_name=sheetname, startrow=gap)
+
+    output.seek(0)
+    # ✅ 한국 시간(KST) 기준
+    kst = timezone(timedelta(hours=9))
+    now_str = datetime.now(kst).strftime("%Y%m%d_%H%M")
+
+    filename = f"식수신청_피벗_{now_str}.xlsx"
+    return send_file(output, download_name=filename, as_attachment=True)
 
 
 
@@ -2032,114 +2339,85 @@ def weekly_dept_excel():
 # ✅ [2] POST /visitors - 저장
 @app.route("/visitors", methods=["POST"])
 def save_visitors():
-    data = request.get_json()
+    try:
+        data = request.json or {}
+        applicant_id   = data.get("applicant_id")
+        applicant_name = data.get("applicant_name")
+        date_str       = data.get("date")          # YYYY-MM-DD
+        reason         = (data.get("reason") or "").strip()
+        vtype          = data.get("type", "방문자")  # 방문자 / 협력사
+        is_admin       = bool(data.get("requested_by_admin", False))
 
-    applicant_id = data.get("applicant_id")
-    applicant_name = data.get("applicant_name")
-    date = data.get("date")
-    breakfast = int(data.get("breakfast", 0))
-    lunch = int(data.get("lunch", 0))
-    dinner = int(data.get("dinner", 0))
-    reason = data.get("reason", "")
-    vtype = data.get("type", "방문자")              # 👉 실제 신청자 타입 저장
-    is_admin = data.get("requested_by_admin", False)  # 👉 관리자 권한 여부는 별도
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not all([applicant_id, applicant_name, date_str, reason]):
+            return jsonify({"error": "필수 값 누락"}), 400
 
-    if not (applicant_id and applicant_name and date and reason):
-        return jsonify({"error": "필수 정보 누락"}), 400
+        # ❶ 전송된 값만 읽기 (None 허용)
+        breakfast = data.get("breakfast")   # None → 보내지 않음
+        lunch     = data.get("lunch")
+        dinner    = data.get("dinner")
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
+        with sqlite3.connect(DATABASE) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
 
-    # ✅ 공휴일 체크 추가
-    cursor.execute("SELECT COUNT(*) as count FROM holidays WHERE date = ?", (date,))
-    if cursor.fetchone()["count"] > 0:
-        conn.close()
-        return jsonify({"error": f"{date}는 공휴일입니다. 신청할 수 없습니다."}), 400
+            # ❷ 기존 레코드 조회 (있을 수도, 없을 수도)
+            cur.execute("""
+              SELECT * FROM visitors
+              WHERE applicant_id = ? AND date = ? AND type = ?
+            """, (applicant_id, date_str, vtype))
+            row = cur.fetchone()
 
-      # ✅ 기존 데이터 조회
-    cursor.execute("""
-        SELECT breakfast, lunch, dinner FROM visitors
-        WHERE applicant_id = ? AND date = ? AND type = ?
-    """, (applicant_id, date, vtype))
-    
-    # existing = cursor.fetchone()
+            # ❸ 최종 저장할 수량 계산 함수
+            def final_qty(old, new, meal):
+                if new is None:                 # 보내지 않았으면 그대로
+                    return old
+                # 마감됐으면(관리자 제외) 그대로
+                if not is_admin and is_expired(meal, date_str):
+                    return old
+                return int(new)
 
-    # ✅ 기존 데이터가 있고, 마감된 항목이면 기존 값 유지
-    row = cursor.fetchone()
+            if row:  # ⇢ 재신청/수정
+                breakfast_final = final_qty(row["breakfast"], breakfast, "breakfast")
+                lunch_final     = final_qty(row["lunch"],     lunch,     "lunch")
+                dinner_final    = final_qty(row["dinner"],    dinner,    "dinner")
+            else:    # ⇢ 최초 신청
+                breakfast_final = int(breakfast or 0)
+                lunch_final     = int(lunch or 0)
+                dinner_final    = int(dinner or 0)
 
-    # 이전 값 초기화
-    old_b, old_l, old_d = (0, 0, 0)
+            # ❹ INSERT … ON CONFLICT → 전송한 컬럼만 업데이트
+            fields = ["applicant_id", "applicant_name", "date",
+                      "reason", "last_modified", "type"]
+            placeholders = "?, ?, ?, ?, CURRENT_TIMESTAMP, ?"
+            values = [applicant_id, applicant_name, date_str, reason, vtype]
 
-    if row:
-        old_b = row["breakfast"]
-        old_l = row["lunch"]
-        old_d = row["dinner"]
+            # 식사 필드는 실제로 보냈을 때만 포함
+            for col, val, sent in [
+                ("breakfast", breakfast_final, breakfast is not None),
+                ("lunch",     lunch_final,     lunch     is not None),
+                ("dinner",    dinner_final,    dinner    is not None)
+            ]:
+                if sent:
+                    fields.append(col)
+                    placeholders += ", ?"
+                    values.append(val)
 
-        def is_expired(meal_type, is_admin=False):
-            meal_date = datetime.strptime(date, "%Y-%m-%d")
-            now = datetime.now()
-            if meal_type == "breakfast":
-                deadline = meal_date - timedelta(days=1)
-                hour = 20 if is_admin else 15
-                deadline = deadline.replace(hour=hour, minute=0, second=0)
-            elif meal_type == "lunch":
-                hour = 12 if is_admin else 10
-                deadline = meal_date.replace(hour=hour, minute=0, second=0)
-            elif meal_type == "dinner":
-                hour = 17 if is_admin else 15
-                deadline = meal_date.replace(hour=hour, minute=0, second=0)
-            else:
-                return False
-            return now > deadline
+            cur.execute(f"""
+              INSERT INTO visitors ({', '.join(fields)})
+              VALUES ({placeholders})
+              ON CONFLICT(applicant_id, date, type)
+              DO UPDATE SET
+                {', '.join(f"{c}=excluded.{c}" for c in fields
+                           if c not in ('applicant_id','applicant_name','date','type'))}
+            """, values)
+            conn.commit()
 
-        if is_expired("breakfast", is_admin):
-            breakfast = old_b
-        if is_expired("lunch", is_admin):
-            lunch = old_l
-        if is_expired("dinner", is_admin):
-            dinner = old_d
+        return jsonify({"message": "저장 완료"}), 201
 
-    # ✅ 2. 기존과 변경된 값이 다를 경우 + 금주에 해당할 경우만 visitor_logs 기록
-    today = datetime.today().date()
-    monday = today - timedelta(days=today.weekday())
-    friday = monday + timedelta(days=4)
-    this_day = datetime.strptime(date, "%Y-%m-%d").date()
+    except Exception as e:
+        print("❌ save_visitors 오류:", e)
+        return jsonify({"error": "저장 실패"}), 500
 
-
-    # 🔄 2. 기존과 변경된 값이 다를 경우 visitor_logs 테이블에 로그 기록
-    if (monday <= this_day <= friday) and (
-        (old_b != breakfast) or (old_l != lunch) or (old_d != dinner)
-    ):
-        cursor.execute("""
-            INSERT INTO visitor_logs (
-                applicant_id, applicant_name, date, reason, type,
-                before_breakfast, before_lunch, before_dinner,
-                breakfast, lunch, dinner, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            applicant_id, applicant_name, date, reason, vtype,
-            old_b, old_l, old_d,
-            breakfast, lunch, dinner, now
-        ))
-
-
-    # ✅ 삽입 or 수정
-    cursor.execute("""
-        INSERT INTO visitors (applicant_id, applicant_name, date, breakfast, lunch, dinner, reason, last_modified, type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(applicant_id, date, type)
-        DO UPDATE SET 
-            breakfast = excluded.breakfast,
-            lunch = excluded.lunch,
-            dinner = excluded.dinner,
-            reason = excluded.reason,
-            last_modified = excluded.last_modified
-    """, (applicant_id, applicant_name, date, breakfast, lunch, dinner, reason, now, vtype))
-
-    conn.commit()
-    conn.close()
-    return jsonify({"message": "신청이 저장되었습니다."}), 201
 
 # ✅ [3] GET /visitors - 신청 현황 조회
 @app.route("/visitors", methods=["GET"])
@@ -2210,37 +2488,40 @@ def delete_visitor_entry(vid):
     return jsonify({"message": "삭제되었습니다."}), 200
 
 # ✅ [5] 방문자 주간 신청 현황 (협력사/방문자 포함)
-@app.route("/visitors/weekly", methods=["GET"])
+@app.route("/visitors/weekly")
 def get_weekly_visitors():
     start = request.args.get("start")
     end = request.args.get("end")
-    applicant_id = request.args.get("id")  # 개인별 필터링 용도 (필요 시)
+    dept = request.args.get("dept")
+    name = request.args.get("name")
+    type_ = request.args.get("type")
 
-    if not (start and end):
-        return jsonify({"error": "start, end 파라미터가 필요합니다."}), 400
+    query = """
+        SELECT v.*, e.name AS applicant_name, e.dept, e.type
+        FROM visitors v
+        LEFT JOIN employees e ON v.applicant_id = e.id
+        WHERE v.date BETWEEN ? AND ?
+    """
+    params = [start, end]
+
+    if dept:
+        query += " AND e.dept LIKE ?"
+        params.append(f"%{dept}%")
+    if name:
+        query += " AND e.name LIKE ?"
+        params.append(f"%{name}%")
+    if type_:
+        query += " AND e.type = ?"
+        params.append(type_)
 
     conn = get_db_connection()
     cursor = conn.cursor()
-
-    if applicant_id:
-        cursor.execute("""
-            SELECT id, applicant_id, applicant_name, date, breakfast, lunch, dinner, reason, last_modified, type
-            FROM visitors
-            WHERE date BETWEEN ? AND ? AND applicant_id = ?
-            ORDER BY date
-        """, (start, end, applicant_id))
-    else:
-        cursor.execute("""
-            SELECT id, applicant_id, applicant_name, date, breakfast, lunch, dinner, reason, last_modified, type
-            FROM visitors
-            WHERE date BETWEEN ? AND ?
-            ORDER BY date
-        """, (start, end))
-
+    cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()
 
-    return jsonify([dict(row) for row in rows]), 200
+    return jsonify([dict(row) for row in rows])
+
 
 # ✅ [6] 방문자 신청 중복 확인용 API
 @app.route("/visitors/check", methods=["GET"])
@@ -2280,65 +2561,76 @@ def check_visitor_duplicate():
 
 @app.route("/visitors/<int:visitor_id>", methods=["PUT"])
 def update_visitor(visitor_id):
+    """
+    ▸ 프런트가 보낸 필드만 수정하고,
+    ▸ 보내지 않은 식사 / reason 값은 그대로 유지한다.
+    """
     try:
-        data = request.json
-        breakfast = int(data.get("breakfast", 0))
-        lunch = int(data.get("lunch", 0))
-        dinner = int(data.get("dinner", 0))
-        reason = data.get("reason", "").strip()
+        data = request.json or {}                       # ① 요청 JSON (없으면 빈 dict)
 
-        if (breakfast + lunch + dinner) == 0 or reason == "":
-            return jsonify({"error": "입력 값 부족"}), 400
-
+        # ② 기존 레코드 조회 ───────────────────────────────
         with sqlite3.connect(DATABASE) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            # ✅ 기존 값 조회
-            cursor.execute("SELECT * FROM visitors WHERE id = ?", (visitor_id,))
-            original = cursor.fetchone()
-
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM visitors WHERE id = ?", (visitor_id,))
+            original = cur.fetchone()
             if not original:
                 return jsonify({"error": "신청 내역 없음"}), 404
 
-            old_b, old_l, old_d = original["breakfast"], original["lunch"], original["dinner"]
+        old_b, old_l, old_d = original["breakfast"], original["lunch"], original["dinner"]
 
-            # 🔧 수정 후 코드
-            # ✅ 변경사항이 있고 + 금주(월~금)일 경우만 로그 기록
-            this_day = datetime.strptime(original["date"], "%Y-%m-%d").date()
-            today = datetime.today().date()
-            monday = today - timedelta(days=today.weekday())
-            friday = monday + timedelta(days=4)
+        # ③ “보낸 필드만” 새 값 계산 ──────────────────────
+        new_b = int(data["breakfast"]) if "breakfast" in data else old_b
+        new_l = int(data["lunch"])     if "lunch"     in data else old_l
+        new_d = int(data["dinner"])    if "dinner"    in data else old_d
+        new_reason = data.get("reason", original["reason"]).strip()
 
-            
-            
-            # ✅ 값이 변경된 경우 로그 기록
-            if (monday <= this_day <= friday) and (
-                old_b != breakfast or old_l != lunch or old_d != dinner
-            ):
-                cursor.execute("""
+        # ④ 입력 검증 (해당 키가 있을 때만) ───────────────
+        if "reason" in data and new_reason == "":
+            return jsonify({"error": "사유를 입력하세요"}), 400
+        if {"breakfast", "lunch", "dinner"} & data.keys() and (new_b + new_l + new_d) == 0:
+            return jsonify({"error": "모든 수량이 0입니다"}), 400
+
+        # ⑤ UPDATE 구문 동적 생성 ────────────────────────
+        fields, params = [], []
+        for col, val in [("breakfast", new_b), ("lunch", new_l), ("dinner", new_d)]:
+            if col in data:                               # 실제로 전송된 컬럼만
+                fields.append(f"{col} = ?")
+                params.append(val)
+        if "reason" in data:                              # reason도 선택 업데이트
+            fields.append("reason = ?")
+            params.append(new_reason)
+
+        # 전송된 필드가 아무것도 없으면 “변경 없음”
+        if not fields:
+            return jsonify({"message": "변경 없음"}), 200
+
+        fields.append("last_modified = CURRENT_TIMESTAMP")
+        params.append(visitor_id)
+
+        # ⑥ DB 반영 및 로그 기록 ─────────────────────────
+        with sqlite3.connect(DATABASE) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(f"UPDATE visitors SET {', '.join(fields)} WHERE id = ?", params)
+
+            # 금주(월~금) & 실제 값 변경 시에만 로그 저장
+            today = date.today()
+            this_weekday = today.weekday()  # 0=월 … 4=금
+            changed = (old_b != new_b) or (old_l != new_l) or (old_d != new_d)
+            if changed and this_weekday <= 4:
+                cur.execute("""
                     INSERT INTO visitor_logs (
-                        applicant_id, applicant_name, date, reason, type,
+                        applicant_id, applicant_name, date, type, reason,
                         before_breakfast, before_lunch, before_dinner,
                         breakfast, lunch, dinner
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    original["applicant_id"],
-                    original["applicant_name"],
-                    original["date"],
-                    reason,
-                    original["type"],
-                    old_b, old_l, old_d,
-                    breakfast, lunch, dinner
+                    original["applicant_id"], original["applicant_name"],
+                    original["date"], original["type"], new_reason,
+                    old_b, old_l, old_d, new_b, new_l, new_d
                 ))
-
-            # ✅ DB 업데이트
-            cursor.execute("""
-                UPDATE visitors
-                SET breakfast = ?, lunch = ?, dinner = ?, reason = ?, last_modified = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """, (breakfast, lunch, dinner, reason, visitor_id))
 
             conn.commit()
 
@@ -2551,4 +2843,3 @@ if __name__ == "__main__":
 
 #     conn.commit()
 #     conn.close()
-
