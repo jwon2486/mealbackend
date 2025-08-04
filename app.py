@@ -622,6 +622,7 @@ def admin_get_meals():
                 "name": row["name"],
                 "dept": row["dept"],
                 "date": row["date"],
+                "region": row["region"],
                 "breakfast": row["breakfast"],
                 "lunch": row["lunch"],
                 "dinner": row["dinner"]
