@@ -596,6 +596,7 @@ def admin_get_meals():
                     m.user_id,
                     e.name,
                     e.dept,
+                    e.region,
                     m.date,
                     m.breakfast,
                     m.lunch,
