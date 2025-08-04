@@ -578,6 +578,7 @@ def admin_get_meals():
                     e.id AS user_id,
                     e.name,
                     e.dept,
+                    e.region,
                     m.date,
                     IFNULL(m.breakfast, 0) AS breakfast,
                     IFNULL(m.lunch, 0) AS lunch,
