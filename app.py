@@ -894,7 +894,7 @@ def login_check():
     conn = get_db_connection()
 
     cursor = conn.execute(
-        "SELECT id, name, dept, rank, type, level FROM employees WHERE id = ? AND name = ?",
+        "SELECT id, name, dept, rank, type, level, region FROM employees WHERE id = ? AND name = ?",
         (emp_id, name)
     )
     user = cursor.fetchone()
@@ -908,7 +908,8 @@ def login_check():
             "dept": user["dept"],
             "rank": user["rank"],
             "type": user["type"], # ✅ 여기서 type 추가 (직영 / 협력사 / 방문자)
-             "level": user["level"]  # ✅ level 포함
+            "level": user["level"],  # ✅ level 포함
+            "region": user["region"]  # ✅ 추가
             
         })
     else:
@@ -1593,7 +1594,7 @@ def weekly_dept_stats():
     # ✅ 4. meals 테이블 데이터 조회
     cursor.execute("""
         SELECT m.date, m.user_id, m.breakfast, m.lunch, m.dinner,
-            e.name, e.dept, e.type, e.region
+            e.name, e.dept, e.type, e.region,
         FROM meals m
         JOIN employees e ON m.user_id = e.id
         WHERE m.date BETWEEN ? AND ?
