@@ -1594,7 +1594,7 @@ def weekly_dept_stats():
     # ✅ 4. meals 테이블 데이터 조회
     cursor.execute("""
         SELECT m.date, m.user_id, m.breakfast, m.lunch, m.dinner,
-            e.name, e.dept, e.type, e.region,
+            e.name, e.dept, e.type, e.region
         FROM meals m
         JOIN employees e ON m.user_id = e.id
         WHERE m.date BETWEEN ? AND ?
