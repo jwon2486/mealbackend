@@ -2233,6 +2233,8 @@ def weekly_dept_excel():
     filename = f"weekly_dept_{start}_to_{end}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+#식수신청 피벗 엑셀 라우트
 @app.route("/admin/stats/pivot_excel")
 def download_pivot_excel():
     from io import BytesIO
@@ -2274,7 +2276,6 @@ def download_pivot_excel():
     conn.close()
 
     # --- 선택 날짜 필터 (옵션) ---
-    only_days = None
     if days_param:
         only_days = set(d.strip() for d in days_param.split(",") if d.strip())
         if not df_meals.empty:
@@ -2319,15 +2320,30 @@ def download_pivot_excel():
         pd.DataFrame(tech_center, columns=["식사일자", "이름", "부서", "식사 구분"])\
             .to_excel(writer, index=False, sheet_name="직영_출장")
 
-        # 협력사_방문객 시트는 두 블록으로 구성
+        # ✅ '협력사_방문객' 시트는 항상 생성 (빈 헤더 방지: 데이터 있는 블록만 작성)
         sheetname = "협력사_방문객"
-        df_direct = pd.DataFrame(visitor_direct, columns=["식사일자", "구분", "부서", "인원수", "식사 구분"])
-        df_others = pd.DataFrame(visitor_others, columns=["식사일자", "구분", "부서", "인원수", "식사 구분"])
+        ws = writer.book.add_worksheet(sheetname)   # 시트만 생성
+        writer.sheets[sheetname] = ws
 
-        df_direct.to_excel(writer, index=False, sheet_name=sheetname, startrow=0)
-        ws = writer.sheets[sheetname]
-        gap = len(df_direct) + 2  # 빈 줄 하나 띄우고 두 번째 블록
-        df_others.to_excel(writer, index=False, sheet_name=sheetname, startrow=gap)
+        start_row = 0
+
+        # 블록1: 직영 직원이 신청한 방문객
+        if len(visitor_direct) > 0:
+            df_direct = pd.DataFrame(
+                visitor_direct,
+                columns=["식사일자", "구분", "부서", "인원수", "식사 구분"]
+            )
+            df_direct.to_excel(writer, index=False, sheet_name=sheetname, startrow=start_row)
+            start_row += len(df_direct) + 2  # 다음 블록과 한 줄 띄우기
+
+        # 블록2: 협력사/방문자가 신청
+        if len(visitor_others) > 0:
+            df_others = pd.DataFrame(
+                visitor_others,
+                columns=["식사일자", "구분", "부서", "인원수", "식사 구분"]
+            )
+            df_others.to_excel(writer, index=False, sheet_name=sheetname, startrow=start_row)
+            # start_row 갱신은 필요 시 추가
 
     output.seek(0)
 
@@ -2340,6 +2356,7 @@ def download_pivot_excel():
                      download_name=filename,
                      as_attachment=True,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
