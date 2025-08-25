@@ -2233,18 +2233,24 @@ def weekly_dept_excel():
     filename = f"weekly_dept_{start}_to_{end}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-# 피벗엑셀 테스트용 코드
 @app.route("/admin/stats/pivot_excel")
 def download_pivot_excel():
+    from io import BytesIO
+    from datetime import datetime, timedelta, timezone
+    import pandas as pd
+    import sqlite3
+
     start = request.args.get("start")
-    end = request.args.get("end")
+    end   = request.args.get("end")
+    days_param = request.args.get("days")  # "YYYY-MM-DD,YYYY-MM-DD,..."
 
     if not start or not end:
         return "start, end 날짜를 지정해주세요.", 400
 
+    # --- DB 조회 ---
     conn = sqlite3.connect("db.sqlite")
 
-    # 직원 식사 신청 데이터
+    # 직원(직영) 식수 신청
     query_meals = """
         SELECT m.date, m.breakfast, m.lunch, m.dinner,
                e.name, e.dept, e.type, e.region
@@ -2255,24 +2261,7 @@ def download_pivot_excel():
     """
     df_meals = pd.read_sql_query(query_meals, conn, params=(start, end))
 
-    eco_center = []
-    tech_center = []
-
-    for _, row in df_meals.iterrows():
-        base = [row["date"], row["name"], row["dept"]]
-        if row["type"] != "직영":
-            continue
-
-        target = eco_center if row["region"] == "에코센터" else tech_center
-
-        if row["breakfast"] == 1:
-            target.append(base + ["조식"])
-        if row["lunch"] == 1:
-            target.append(base + ["중식"])
-        if row["dinner"] == 1:
-            target.append(base + ["석식"])
-
-    # ✅ 방문자/협력사 데이터 조회
+    # 방문자/협력사 신청
     query_visitors = """
         SELECT v.applicant_name, v.date, v.breakfast, v.lunch, v.dinner, v.type,
                e.dept, e.type as emp_type
@@ -2284,56 +2273,74 @@ def download_pivot_excel():
     df_visitors = pd.read_sql_query(query_visitors, conn, params=(start, end))
     conn.close()
 
-    # ✅ 구분된 리스트 초기화
-    visitor_direct = []   # 직영 직원이 신청한 방문객
-    visitor_others = []   # 협력사 및 방문자 신청 인원수
+    # --- 선택 날짜 필터 (옵션) ---
+    only_days = None
+    if days_param:
+        only_days = set(d.strip() for d in days_param.split(",") if d.strip())
+        if not df_meals.empty:
+            df_meals = df_meals[df_meals["date"].isin(only_days)]
+        if not df_visitors.empty:
+            df_visitors = df_visitors[df_visitors["date"].isin(only_days)]
 
+    # --- 피벗용 리스트 구성 ---
+    eco_center = []   # 직영-에코센터
+    tech_center = []  # 직영-출장
+
+    for _, row in df_meals.iterrows():
+        # 직영만 출력
+        if row.get("type") != "직영":
+            continue
+        base = [row["date"], row["name"], row["dept"]]
+        target = eco_center if row.get("region") == "에코센터" else tech_center
+        if int(row.get("breakfast", 0)) == 1: target.append(base + ["조식"])
+        if int(row.get("lunch", 0))     == 1: target.append(base + ["중식"])
+        if int(row.get("dinner", 0))    == 1: target.append(base + ["석식"])
+
+    # 방문자/협력사는 신청자 타입(emp_type)으로 블록 분리
+    visitor_direct = []  # 직영 직원이 신청한 방문객
+    visitor_others = []  # 협력사/방문자 신청
     for _, row in df_visitors.iterrows():
         base = [row["date"], row["type"], row["dept"]]
-        emp_type = row["emp_type"]  # 신청자 본인의 타입
+        emp_type = row.get("emp_type")
+        def push(meal_label, cnt):
+            if int(cnt or 0) > 0:
+                rec = base + [int(cnt), meal_label]
+                (visitor_direct if emp_type == "직영" else visitor_others).append(rec)
+        push("조식", row.get("breakfast"))
+        push("중식", row.get("lunch"))
+        push("석식", row.get("dinner"))
 
-        def append_if_positive(meal_type, count):
-            if count > 0:
-                row_data = base + [count, meal_type]
-                if emp_type == "직영":
-                    visitor_direct.append(row_data)
-                else:
-                    visitor_others.append(row_data)
-
-        append_if_positive("조식", row["breakfast"])
-        append_if_positive("중식", row["lunch"])
-        append_if_positive("석식", row["dinner"])
-
-    # ✅ 엑셀 생성
+    # --- 엑셀 출력 ---
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        # 직영 시트 2개
         pd.DataFrame(eco_center, columns=["식사일자", "이름", "부서", "식사 구분"])\
             .to_excel(writer, index=False, sheet_name="직영_에코센터")
-
         pd.DataFrame(tech_center, columns=["식사일자", "이름", "부서", "식사 구분"])\
             .to_excel(writer, index=False, sheet_name="직영_출장")
 
-        # 시트 작성: 협력사_방문객
+        # 협력사_방문객 시트는 두 블록으로 구성
         sheetname = "협력사_방문객"
-        wb = writer.book
         df_direct = pd.DataFrame(visitor_direct, columns=["식사일자", "구분", "부서", "인원수", "식사 구분"])
         df_others = pd.DataFrame(visitor_others, columns=["식사일자", "구분", "부서", "인원수", "식사 구분"])
 
-        # 첫 번째 블록 작성
         df_direct.to_excel(writer, index=False, sheet_name=sheetname, startrow=0)
         ws = writer.sheets[sheetname]
-
-        # 빈 줄 이후 두 번째 블록 작성
-        gap = len(df_direct) + 2
+        gap = len(df_direct) + 2  # 빈 줄 하나 띄우고 두 번째 블록
         df_others.to_excel(writer, index=False, sheet_name=sheetname, startrow=gap)
 
     output.seek(0)
-    # ✅ 한국 시간(KST) 기준
+
+    # 한국시간 파일명
     kst = timezone(timedelta(hours=9))
     now_str = datetime.now(kst).strftime("%Y%m%d_%H%M")
-
     filename = f"식수신청_피벗_{now_str}.xlsx"
-    return send_file(output, download_name=filename, as_attachment=True)
+
+    return send_file(output,
+                     download_name=filename,
+                     as_attachment=True,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
