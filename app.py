@@ -758,14 +758,17 @@ def add_employee():
     rank = data.get("rank", "")
     emp_type = data.get("type", "직영")  # 기본값: 직영
     emp_region = data.get("region", "에코센터")  # ✅ 지역 추가
+    level = int(data.get("level", 1))
+    if level not in (1, 2, 3):
+        level = 1
 
     if not emp_id or not name or not dept or not emp_type or not emp_region:
         return jsonify({"error": "입력값 부족"}), 400
 
     conn = get_db_connection()
     try:
-        conn.execute("INSERT INTO employees (id, name, dept, rank, type, region) VALUES (?, ?, ?, ?, ?, ?)",
-                     (emp_id, name, dept, rank, emp_type, emp_region))
+        conn.execute("INSERT INTO employees (id, name, dept, rank, type, region, level) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (emp_id, name, dept, rank, emp_type, emp_region, level))
         conn.commit()
         return jsonify({"success": True}), 201
     except sqlite3.IntegrityError:
@@ -785,13 +788,16 @@ def update_employee(emp_id):
     rank = data.get("rank", "")
     emp_type = data.get("type", "직영")  # 기본값: 직영
     emp_region = data.get("region", "에코센터")  # ✅ 지역 추가
+    level = int(data.get("level", 1))
+    if level not in (1, 2, 3):
+        level = 1
 
     if not emp_id or not name or not dept or not emp_type or not emp_region:
         return jsonify({"error": "입력값 부족"}), 400
 
     conn = get_db_connection()
-    conn.execute("UPDATE employees SET name = ?, dept = ?, rank = ?, type = ?, region = ? WHERE id = ?",
-                 (name, dept, rank, emp_type, emp_region, emp_id))
+    conn.execute("UPDATE employees SET name = ?, dept = ?, rank = ?, type = ?, region = ?, level = ? WHERE id = ?",
+            (name, dept, rank, emp_type, emp_region, level, emp_id))
     conn.commit()
     conn.close()
     return jsonify({"success": True}), 200
