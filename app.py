@@ -356,6 +356,7 @@ def save_meals():
             breakfast = int(meal.get("breakfast", 0))
             lunch = int(meal.get("lunch", 0))
             dinner = int(meal.get("dinner", 0))
+            created_at_in = meal.get("created_at")
 
             # 🔁 기존 데이터 불러오기 (변경 비교용)
             cursor.execute("""
@@ -370,14 +371,14 @@ def save_meals():
 
             # ✅ 데이터 저장 (기존 데이터가 있든 없든 업데이트 또는 삽입)
             cursor.execute("""
-                INSERT INTO meals (user_id, date, breakfast, lunch, dinner)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, date)
-                DO UPDATE SET
+                INSERT INTO meals (user_id, date, breakfast, lunch, dinner, created_at)
+                VALUES (?, ?, ?, ?, ?, COALESCE(?, datetime('now','localtime')))
+                ON CONFLICT(user_id, date) DO UPDATE SET
                     breakfast = excluded.breakfast,
-                    lunch = excluded.lunch,
-                    dinner = excluded.dinner
-            """, (user_id, date, breakfast, lunch, dinner))
+                    lunch     = excluded.lunch,
+                    dinner    = excluded.dinner,
+                    created_at = COALESCE(meals.created_at, excluded.created_at)
+            """, (user_id, date, breakfast, lunch, dinner, created_at_in))
 
             # 로그 기록 (금주 + 변경된 경우만)
             try:
@@ -445,12 +446,15 @@ def get_selfcheck():
 
     conn = get_db_connection()
     row = conn.execute(
-        'SELECT checked FROM selfcheck WHERE user_id = ? AND date = ?',
+        'SELECT checked, created_at FROM selfcheck WHERE user_id = ? AND date = ?',
         (user_id, date)
     ).fetchone()
     conn.close()
 
-    return jsonify({'checked': row['checked'] if row else 0})
+    return jsonify({
+        'checked': row['checked'] if row else 0,
+        'created_at': row['created_at'] if row else None
+    })
 
 
 #본인 확인 체크박스 상태를 서버로 전송하는 함수
@@ -459,6 +463,7 @@ def post_selfcheck():
     user_id = request.json.get('user_id')  # ✅ 수정
     date = request.json.get('date')
     checked = request.json.get('checked')
+    created_at_in = request.json.get('created_at')
 
     if not user_id or not date:
         return jsonify({'error': 'Missing session or date'}), 400
@@ -471,15 +476,18 @@ def post_selfcheck():
     ).fetchone()
 
     if existing:
-        conn.execute(
-            'UPDATE selfcheck SET checked = ? WHERE user_id = ? AND date = ?',
-            (checked, user_id, date)
-        )
+        # 기존 created_at이 비어 있으면 채워주고, 있으면 그대로 둠
+        conn.execute("""
+            UPDATE selfcheck
+               SET checked = ?,
+                   created_at = COALESCE(created_at, ?)
+             WHERE user_id = ? AND date = ?
+        """, (checked, created_at_in, user_id, date))
     else:
-        conn.execute(
-            'INSERT INTO selfcheck (user_id, date, checked) VALUES (?, ?, ?)',
-            (user_id, date, checked)
-        )
+        conn.execute("""
+            INSERT INTO selfcheck (user_id, date, checked, created_at)
+            VALUES (?, ?, ?, COALESCE(?, datetime('now','localtime')))
+        """, (user_id, date, checked, created_at_in))
     conn.commit()
     conn.close()
 
@@ -532,7 +540,7 @@ def get_user_meals():
 
     conn = get_db_connection()
     cursor = conn.execute("""
-        SELECT m.date, m.breakfast, m.lunch, m.dinner,
+        SELECT m.date, m.breakfast, m.lunch, m.dinner, m.created_at,   -- ← 추가
                e.name, e.dept, e.rank
         FROM meals m
         JOIN employees e ON m.user_id = e.id
@@ -547,13 +555,13 @@ def get_user_meals():
     for row in rows:
         result[row["date"]] = {
             "breakfast": row["breakfast"] == 1,
-            "lunch": row["lunch"] == 1,
-            "dinner": row["dinner"] == 1,
-            "name": row["name"],
-            "dept": row["dept"],
-            "rank": row["rank"]
+            "lunch"    : row["lunch"] == 1,
+            "dinner"   : row["dinner"] == 1,
+            "name"     : row["name"],
+            "dept"     : row["dept"],
+            "rank"     : row["rank"],
+            "created_at": row["created_at"],   # ← 추가
         }
-
     return jsonify(result), 200
 
 # ✅ [GET] /admin/meals
