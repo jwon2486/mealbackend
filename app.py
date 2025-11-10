@@ -460,34 +460,42 @@ def get_selfcheck():
 #본인 확인 체크박스 상태를 서버로 전송하는 함수
 @app.route('/selfcheck', methods=['POST'])
 def post_selfcheck():
-    user_id = request.json.get('user_id')  # ✅ 수정
+    user_id = request.json.get('user_id')
     date = request.json.get('date')
     checked = request.json.get('checked')
     created_at_in = request.json.get('created_at')
+    force_update = request.json.get('force_update', False)  # 🔥 추가
 
     if not user_id or not date:
         return jsonify({'error': 'Missing session or date'}), 400
 
     conn = get_db_connection()
-    # 기존 값 있는지 확인
     existing = conn.execute(
         'SELECT 1 FROM selfcheck WHERE user_id = ? AND date = ?',
         (user_id, date)
     ).fetchone()
 
     if existing:
-        # 기존 created_at이 비어 있으면 채워주고, 있으면 그대로 둠
-        conn.execute("""
-            UPDATE selfcheck
-               SET checked = ?,
-                   created_at = COALESCE(created_at, ?)
-             WHERE user_id = ? AND date = ?
-        """, (checked, created_at_in, user_id, date))
+        if force_update:
+            # ✅ 관리자 요청이면 created_at을 새로 덮어씀
+            conn.execute("""
+                UPDATE selfcheck
+                   SET checked = ?, created_at = ?
+                 WHERE user_id = ? AND date = ?
+            """, (checked, created_at_in, user_id, date))
+        else:
+            # 일반 사용자 — 기존 created_at 유지
+            conn.execute("""
+                UPDATE selfcheck
+                   SET checked = ?, created_at = COALESCE(created_at, ?)
+                 WHERE user_id = ? AND date = ?
+            """, (checked, created_at_in, user_id, date))
     else:
         conn.execute("""
             INSERT INTO selfcheck (user_id, date, checked, created_at)
             VALUES (?, ?, ?, COALESCE(?, datetime('now','localtime')))
         """, (user_id, date, checked, created_at_in))
+
     conn.commit()
     conn.close()
 
