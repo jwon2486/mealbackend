@@ -344,8 +344,6 @@ def update_last_checked(year):
 backup_thread_started = False
 backup_thread_lock = threading.Lock()
 
-backup_thread_started = False
-backup_thread_lock = threading.Lock()
 
 def start_backup_thread():
     """
@@ -2835,6 +2833,11 @@ def update_visitor(visitor_id):
         print("❌ 방문자 수정 오류:", e)
         return jsonify({"error": "수정 실패"}), 500
 
+@app.route("/backup/test")
+def backup_test():
+    backup_db_to_github()
+    return "Backup Done", 200
+
 
 # ✅ 최소 응답을 위한 ping 엔드포인트
 @app.route("/ping")
@@ -2861,11 +2864,6 @@ if __name__ == "__main__":
     #alter_meals_table_unique_key()
     # alter_employees_add_type()  # ✅ 여기에 추가하세요
 
-    # 🔹 매일 자정마다 자동 백업 워커 실행
-    threading.Thread(
-        target=backup_worker_midnight,
-        daemon=True
-    ).start()
     # import os                                #실제사용
     port = int(os.environ.get("PORT", 5000)) #실제사용
     app.run(host="0.0.0.0", port=port)       #실제사용
