@@ -157,6 +157,16 @@ app = Flask(__name__)
 # 모든 도메인에서 CORS 허용 (프론트엔드가 localhost:3000 등에 있어도 접근 가능)
 CORS(app) #프론트와 연동
 
+# ---- 여기 추가 ----
+# 앱 프로세스가 시작될 때 6시간마다 백업하는 워커 스레드 시작
+backup_thread = threading.Thread(
+    target=backup_worker,
+    args=(12 * 60 * 60,),   # 6시간 = 21600초 (원하면 24시간 등으로 조절)
+    daemon=True
+)
+backup_thread.start()
+# -------------------
+
 # ✅ SQLite 데이터베이스 연결 함수
 def get_db_connection():
      # db.sqlite 파일을 연결. 없으면 새로 생성됨.
