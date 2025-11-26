@@ -23,12 +23,132 @@ import xmltodict
 import requests
 import ssl
 from requests.adapters import HTTPAdapter
+import base64
+import threading
+import time
 
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE = os.path.join(BASE_DIR, "db.sqlite")
 DB_PATH = "db.sqlite"
+
+# ===== GitHub 백업 설정 =====
+GITHUB_REPO   = "jwon2486/MealDB-Backup"   # 새로 만든 백업 레포
+GITHUB_BRANCH = "main"                     # 기본 브랜치
+GITHUB_PATH   = "db.sqlite"                # 레포 안에서 파일 이름/경로
+GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN")
+GITHUB_API    = "https://api.github.com"
+
+
+def create_db_snapshot():
+    """
+    실행 중인 db.sqlite를 안전하게 복사해서 스냅샷 파일 경로를 반환
+    """
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = os.path.join(BASE_DIR, "db_backups")
+        os.makedirs(backup_dir, exist_ok=True)
+
+        snapshot_path = os.path.join(backup_dir, f"db_{ts}.sqlite")
+        shutil.copy2(DATABASE, snapshot_path)   # 파일 직접 복사
+
+        return snapshot_path
+    except Exception as e:
+        print("❌ DB 스냅샷 생성 실패:", e)
+        return None
+
+
+def upload_file_to_github(file_path):
+    """
+    주어진 파일을 GitHub 백업 레포에 업로드/업데이트
+    """
+    if not GITHUB_TOKEN:
+        print("⚠️ GITHUB_TOKEN 환경변수가 설정되지 않았습니다. 백업 건너뜀.")
+        return
+
+    # 파일 내용을 base64 인코딩
+    with open(file_path, "rb") as f:
+        content_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",   # fine-grained PAT
+        "Accept": "application/vnd.github+json",
+    }
+
+    url = f"{GITHUB_API}/repos/{GITHUB_REPO}/contents/{GITHUB_PATH}"
+
+    # 기존 파일 sha 조회 (있으면 업데이트, 없으면 신규 생성)
+    sha = None
+    get_resp = requests.get(url, headers=headers, params={"ref": GITHUB_BRANCH})
+    if get_resp.status_code == 200:
+        sha = get_resp.json().get("sha")
+
+    payload = {
+        "message": f"Automated db backup - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "content": content_b64,
+        "branch": GITHUB_BRANCH,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    put_resp = requests.put(url, headers=headers, json=payload)
+    if 200 <= put_resp.status_code < 300:
+        path = put_resp.json().get("content", {}).get("path")
+        print(f"✅ GitHub DB 백업 성공: {path}")
+    else:
+        print("❌ GitHub DB 백업 실패:", put_resp.status_code, put_resp.text)
+
+
+def backup_db_to_github():
+    """
+    스냅샷 생성 후 GitHub 업로드까지 한 번에 수행
+    """
+    snapshot = create_db_snapshot()
+    if snapshot:
+        upload_file_to_github(snapshot)
+
+
+def backup_worker(interval_seconds=3600):
+    """
+    interval_seconds 간격으로 DB를 GitHub에 백업하는 백그라운드 작업
+    """
+    while True:
+        try:
+            print("⏱ DB 자동 백업 실행...")
+            backup_db_to_github()
+        except Exception as e:
+            print("❌ 백업 스레드 오류:", e)
+        time.sleep(interval_seconds)
+
+KST = timezone(timedelta(hours=9))
+
+def backup_worker_midnight():
+    """
+    매일 자정(한국 시간 기준)에 DB 백업을 실행하는 워커
+    """
+    while True:
+        # 현재 KST 시간
+        now_kst = datetime.now(KST)
+
+        # 다음 자정(KST) 계산
+        next_run_kst = (now_kst + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        wait_seconds = (next_run_kst - now_kst).total_seconds()
+
+        print(f"🕛 [백업] 다음 실행 예정(KST): {next_run_kst} (대기 {int(wait_seconds)}초)")
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+        # 자정에 백업 실행
+        try:
+            print("⏱ [백업] 자정 DB 백업 실행 (KST 기준)...")
+            backup_db_to_github()
+        except Exception as e:
+            print("❌ [백업] 자정 백업 중 오류:", e)
+
+
 
 # Flask 앱 생성
 app = Flask(__name__)
@@ -184,6 +304,7 @@ def download_database():
 
 
 
+
 # SSL 오류 우회를 위한 requests 어댑터 클래스
 class SSLAdapter(HTTPAdapter):
     def init_poolmanager(self, *args, **kwargs):
@@ -218,6 +339,23 @@ def update_last_checked(year):
     """, (year, now_str))
     conn.commit()
     conn.close()
+    
+# 🔒 백업 워커 중복 실행 방지용
+backup_thread_started = False
+backup_thread_lock = threading.Lock()
+
+@app.before_first_request
+def start_backup_thread():
+    """
+    첫 요청이 들어올 때 자정 백업 워커 시작
+    """
+    global backup_thread_started
+    with backup_thread_lock:
+        if not backup_thread_started:
+            print("🚀 [백업] 자정 백업 워커 시작")
+            t = threading.Thread(target=backup_worker_midnight, daemon=True)
+            t.start()
+            backup_thread_started = True
 
 # 📌 공공 API 또는 DB 캐시를 활용하여 지정 연도의 공휴일 목록을 반환하는 엔드포인트
 @app.route("/api/public-holidays")
@@ -2716,6 +2854,11 @@ if __name__ == "__main__":
     #alter_meals_table_unique_key()
     # alter_employees_add_type()  # ✅ 여기에 추가하세요
 
+    # 🔹 매일 자정마다 자동 백업 워커 실행
+    threading.Thread(
+        target=backup_worker_midnight,
+        daemon=True
+    ).start()
     # import os                                #실제사용
     port = int(os.environ.get("PORT", 5000)) #실제사용
     app.run(host="0.0.0.0", port=port)       #실제사용
