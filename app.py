@@ -339,12 +339,11 @@ def update_last_checked(year):
     """, (year, now_str))
     conn.commit()
     conn.close()
-    
+
 # 🔒 백업 워커 중복 실행 방지용
 backup_thread_started = False
 backup_thread_lock = threading.Lock()
 
-@app.before_first_request
 def start_backup_thread():
     """
     첫 요청이 들어올 때 자정 백업 워커 시작
