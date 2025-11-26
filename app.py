@@ -344,9 +344,13 @@ def update_last_checked(year):
 backup_thread_started = False
 backup_thread_lock = threading.Lock()
 
+backup_thread_started = False
+backup_thread_lock = threading.Lock()
+
 def start_backup_thread():
     """
-    첫 요청이 들어올 때 자정 백업 워커 시작
+    앱이 시작될 때 자정 백업 워커를 한 번만 시작
+    (Flask 3에서는 before_first_request 데코레이터가 제거되었으므로 직접 호출)
     """
     global backup_thread_started
     with backup_thread_lock:
@@ -355,6 +359,10 @@ def start_backup_thread():
             t = threading.Thread(target=backup_worker_midnight, daemon=True)
             t.start()
             backup_thread_started = True
+
+# 모듈이 로드될 때 바로 한 번 실행
+start_backup_thread()
+
 
 # 📌 공공 API 또는 DB 캐시를 활용하여 지정 연도의 공휴일 목록을 반환하는 엔드포인트
 @app.route("/api/public-holidays")
