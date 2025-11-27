@@ -135,15 +135,15 @@ KST = timezone(timedelta(hours=9))
 
 def backup_worker_midnight():
     """
-    매일 자정(한국 시간 기준)에 DB 백업을 실행하는 워커
+    매일 오전8시(한국 시간 기준)에 DB 백업을 실행하는 워커
     """
     while True:
         # 현재 KST 시간
         now_kst = datetime.now(KST)
 
-        # 다음 자정(KST) 계산
+        # 다음 오전8시(KST) 계산
         next_run_kst = (now_kst + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
+            hour=8, minute=0, second=0, microsecond=0
         )
         wait_seconds = (next_run_kst - now_kst).total_seconds()
 
@@ -151,12 +151,12 @@ def backup_worker_midnight():
         if wait_seconds > 0:
             time.sleep(wait_seconds)
 
-        # 자정에 백업 실행
+        # 8시에 백업 실행
         try:
-            print("⏱ [백업] 자정 DB 백업 실행 (KST 기준)...")
+            print("⏱ [백업]8시 DB 백업 실행(KST) ...")
             backup_db_to_github()
         except Exception as e:
-            print("❌ [백업] 자정 백업 중 오류:", e)
+            print("❌ [백업] 8시 백업 중 오류:", e)
 
 
 
