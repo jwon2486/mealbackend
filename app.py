@@ -60,42 +60,52 @@ def create_db_snapshot():
 
 
 def upload_file_to_github(file_path):
-    """
-    주어진 파일을 GitHub 백업 레포에 업로드/업데이트
-    """
+    
     if not GITHUB_TOKEN:
         print("⚠️ GITHUB_TOKEN 환경변수가 설정되지 않았습니다. 백업 건너뜀.")
         return
 
-    # 파일 내용을 base64 인코딩
+    # 파일 base64 인코딩
     with open(file_path, "rb") as f:
         content_b64 = base64.b64encode(f.read()).decode("utf-8")
 
     headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",   # fine-grained PAT
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github+json",
     }
 
     url = f"{GITHUB_API}/repos/{GITHUB_REPO}/contents/{GITHUB_PATH}"
 
-    # 기존 파일 sha 조회 (있으면 업데이트, 없으면 신규 생성)
+    # 기존 sha 조회
     sha = None
     get_resp = requests.get(url, headers=headers, params={"ref": GITHUB_BRANCH})
     if get_resp.status_code == 200:
         sha = get_resp.json().get("sha")
 
+    # 🔥 KST 날짜 적용
+    now_kst_iso = datetime.now(KST).isoformat()
+    now_kst_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+
     payload = {
-        "message": f"Automated db backup - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "message": f"Automated db backup - {now_kst_str} KST",
         "content": content_b64,
         "branch": GITHUB_BRANCH,
+
+        # 🔥 GitHub 커밋 타임존을 KST로 고정
+        "committer": {
+            "name": "Backup Bot",
+            "email": "backup@example.com",
+            "date": datetime.now(KST).isoformat()
+        }
     }
+
     if sha:
         payload["sha"] = sha
 
     put_resp = requests.put(url, headers=headers, json=payload)
+
     if 200 <= put_resp.status_code < 300:
-        path = put_resp.json().get("content", {}).get("path")
-        print(f"✅ GitHub DB 백업 성공: {path}")
+        print(f"✅ GitHub DB 백업 성공: {file_path}")
     else:
         print("❌ GitHub DB 백업 실패:", put_resp.status_code, put_resp.text)
 
