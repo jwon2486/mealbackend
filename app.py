@@ -373,7 +373,7 @@ def start_backup_thread():
     global backup_thread_started
     with backup_thread_lock:
         if not backup_thread_started:
-            print("🚀 [백업] 자정 백업 워커 시작")
+            print("🚀 [백업] DB 백업 워커 시작")
             t = threading.Thread(target=backup_worker_midnight, daemon=True)
             t.start()
             backup_thread_started = True
