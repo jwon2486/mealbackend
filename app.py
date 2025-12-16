@@ -310,7 +310,9 @@ def is_expired(meal_type, date_str):
 def is_this_week(date_str):
     try:
         target = datetime.strptime(date_str, "%Y-%m-%d").date()
-        monday, friday = get_week_range_kst()
+        today = datetime.now(KST).date()
+        monday = today - timedelta(days=today.weekday())  # 이번 주 월요일
+        friday = monday + timedelta(days=4)               # 이번 주 금요일
         return monday <= target <= friday
     except:
         return False
@@ -549,7 +551,9 @@ def save_meals():
 
             # 로그 기록 (금주 + 변경된 경우만)
             try:
-                mon, fri = get_week_range_kst()
+                today = datetime.now(KST).date()
+                mon = today - timedelta(days=today.weekday())
+                fri = mon + timedelta(days=4)
                 this_day = datetime.strptime(date, "%Y-%m-%d").date()
 
                 if mon <= this_day <= fri:
@@ -836,7 +840,9 @@ def admin_edit_meals():
     if not meals:
         return jsonify({"error": "meals 데이터가 필요합니다."}), 400
 
-    monday, friday = get_week_range_kst()
+    today = datetime.now(KST).date()  # 👈 날짜 객체로 변경
+    monday = today - timedelta(days=today.weekday())
+    friday = monday + timedelta(days=4)
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -2671,8 +2677,10 @@ def delete_visitor_entry(vid):
 
     # ✅ 로그 기록 (조건: 금주에 한함)
     date_obj = datetime.strptime(original["date"], "%Y-%m-%d").date()
+    today = datetime.now(KST).date()
+    monday = today - timedelta(days=today.weekday())
+    friday = monday + timedelta(days=4)
 
-    monday, friday = get_week_range_kst()  # ✅ 주간 범위 계산 통일 (KST 기준)
     if monday <= date_obj <= friday:
         cursor.execute("""
             INSERT INTO visitor_logs (
@@ -2690,7 +2698,7 @@ def delete_visitor_entry(vid):
             original["lunch"],
             original["dinner"],
             '삭제', '삭제', '삭제',
-            datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ))
 
     cursor.execute("DELETE FROM visitors WHERE id = ?", (vid,))
@@ -2826,11 +2834,10 @@ def update_visitor(visitor_id):
             cur.execute(f"UPDATE visitors SET {', '.join(fields)} WHERE id = ?", params)
 
             # 금주(월~금) & 실제 값 변경 시에만 로그 저장
-            mon, fri = get_week_range_kst()
-            date_obj = datetime.strptime(original["date"], "%Y-%m-%d").date()
+            today = date.today()
+            this_weekday = today.weekday()  # 0=월 … 4=금
             changed = (old_b != new_b) or (old_l != new_l) or (old_d != new_d)
-
-            if changed and (mon <= date_obj <= fri):
+            if changed and this_weekday <= 4:
                 cur.execute("""
                     INSERT INTO visitor_logs (
                         applicant_id, applicant_name, date, type, reason,
