@@ -2847,7 +2847,7 @@ def update_visitor(visitor_id):
                         before_breakfast, before_lunch, before_dinner,
                         breakfast, lunch, dinner, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     original["applicant_id"], original["applicant_name"],
                     original["date"], original["type"], new_reason,
