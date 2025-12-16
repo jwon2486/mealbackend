@@ -40,6 +40,8 @@ GITHUB_PATH   = "db.sqlite"                # 레포 안에서 파일 이름/경�
 GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN")
 GITHUB_API    = "https://api.github.com"
 
+kst_now = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
 def get_week_range_kst():
     now = datetime.now(KST).date()
     monday = now - timedelta(days=now.weekday())
@@ -2842,13 +2844,13 @@ def update_visitor(visitor_id):
                     INSERT INTO visitor_logs (
                         applicant_id, applicant_name, date, type, reason,
                         before_breakfast, before_lunch, before_dinner,
-                        breakfast, lunch, dinner
+                        breakfast, lunch, dinner, updated_at
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     original["applicant_id"], original["applicant_name"],
                     original["date"], original["type"], new_reason,
-                    old_b, old_l, old_d, new_b, new_l, new_d
+                    old_b, old_l, old_d, new_b, new_l, new_d, kst_now
                 ))
 
             conn.commit()
