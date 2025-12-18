@@ -2836,23 +2836,28 @@ def update_visitor(visitor_id):
             cur = conn.cursor()
             cur.execute(f"UPDATE visitors SET {', '.join(fields)} WHERE id = ?", params)
 
-            # 금주(월~금) & 실제 값 변경 시에만 로그 저장
-            today = date.today()
-            this_weekday = today.weekday()  # 0=월 … 4=금
-            changed = (old_b != new_b) or (old_l != new_l) or (old_d != new_d)
-            if changed and this_weekday <= 4:
-                cur.execute("""
-                    INSERT INTO visitor_logs (
-                        applicant_id, applicant_name, date, type, reason,
-                        before_breakfast, before_lunch, before_dinner,
-                        breakfast, lunch, dinner, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    original["applicant_id"], original["applicant_name"],
-                    original["date"], original["type"], new_reason,
-                    old_b, old_l, old_d, new_b, new_l, new_d, kst_now
-                ))
+            # ✅ 금주(월~금) & 실제 값 변경 시에만 로그 저장 (대상 날짜 기준)
+        date_obj = datetime.strptime(original["date"], "%Y-%m-%d").date()
+
+        today = datetime.now(KST).date()
+        monday = today - timedelta(days=today.weekday())
+        friday = monday + timedelta(days=4)
+
+        changed = (old_b != new_b) or (old_l != new_l) or (old_d != new_d)
+
+        if changed and (monday <= date_obj <= friday):
+            cur.execute("""
+                INSERT INTO visitor_logs (
+                    applicant_id, applicant_name, date, type, reason,
+                    before_breakfast, before_lunch, before_dinner,
+                    breakfast, lunch, dinner, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                original["applicant_id"], original["applicant_name"],
+                original["date"], original["type"], new_reason,
+                old_b, old_l, old_d, new_b, new_l, new_d, kst_now
+            ))
 
             conn.commit()
 
