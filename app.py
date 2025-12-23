@@ -395,6 +395,7 @@ start_backup_thread()
 @app.route("/api/public-holidays")
 def get_public_holidays():
     year = request.args.get("year", default=datetime.now().year, type=int)
+    force = request.args.get("force", "0") == "1"
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -407,7 +408,14 @@ def get_public_holidays():
     """)
     conn.commit()
 
-    if should_refresh_public_holidays(year):
+    if force or should_refresh_public_holidays(year):
+    
+        # ✅ force=1이면 해당 연도 데이터 + 캐시 기록 삭제 후 재수집
+        if force:
+            cur.execute("DELETE FROM public_holidays WHERE substr(date, 1, 4) = ?", (str(year),))
+            cur.execute("DELETE FROM public_holiday_meta WHERE year = ?", (year,))
+            conn.commit()
+
         session = requests.Session()
         session.mount("https://", SSLAdapter())
 
@@ -464,16 +472,15 @@ def get_public_holidays():
 
                 for item in items:
                     locdate = item.get("locdate")
-                desc = item.get("dateName")
+                    desc = item.get("dateName")
 
-                if locdate and desc:
-                    locdate_str = str(locdate)  # ✅ int/str 모두 안전 처리
-                    formatted = f"{locdate_str[:4]}-{locdate_str[4:6]}-{locdate_str[6:8]}"
-                    cur.execute(
-                        "INSERT OR IGNORE INTO public_holidays (date, description, source) VALUES (?, ?, ?)",
-                        (formatted, desc, "api")
-                    )
-
+                    if locdate and desc:
+                        locdate_str = str(locdate)  # ✅ int/str 모두 안전 처리
+                        formatted = f"{locdate_str[:4]}-{locdate_str[4:6]}-{locdate_str[6:8]}"
+                        cur.execute(
+                            "INSERT OR IGNORE INTO public_holidays (date, description, source) VALUES (?, ?, ?)",
+                            (formatted, desc, "api")
+                        )
             except Exception as e:
                 print(f"❌ {month}월 공공 공휴일 호출 실패: {e}")
 
