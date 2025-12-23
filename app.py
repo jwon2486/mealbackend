@@ -413,15 +413,49 @@ def get_public_holidays():
 
         for month in range(1, 13):
             url = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
+
+            service_key = os.environ.get(
+                "PUBLIC_HOLIDAY_SERVICE_KEY",
+                "f80f73afedb3a5bd607ad7cb5a9a65bfa7975f6fd3f47d3ac0a7cadfa9e80273"  # 임시 기본값
+            ).strip()
+
             params = {
-                "serviceKey": "ywxiklmvtWMb6FoB65sx1spQszjN0laDn4jOjhNY2+zEQeNWBabS+RS3BluouR+NTBgt7a0Djq+uiErl+kKKKw==",
+                "serviceKey": service_key,
                 "solYear": str(year),
-                "solMonth": f"{month:02d}"
+                "solMonth": f"{month:02d}",
+                "_type": "json",  # JSON 우선 요청 (지원 안 하면 XML이 올 수도 있음)
             }
+
             try:
                 response = session.get(url, params=params, timeout=10)
-                data = xmltodict.parse(response.text)
-                items = data.get("response", {}).get("body", {}).get("items", {}).get("item", [])
+
+                # HTTP 오류면 원인 파악을 위해 본문 일부를 출력
+                if response.status_code != 200:
+                    print("❌ 공휴일 API HTTP 오류:", response.status_code)
+                    print("❌ 응답 일부:", response.text[:300])
+                    continue
+
+                text = response.text.lstrip()
+
+                # 1) JSON이면 JSON 파싱
+                if text.startswith("{"):
+                    data = response.json()
+                    items = (
+                        data.get("response", {})
+                            .get("body", {})
+                            .get("items", {})
+                            .get("item", [])
+                    )
+
+                # 2) JSON이 아니면 XML 파싱 (기존 방식 유지)
+                else:
+                    data = xmltodict.parse(response.text)
+                    items = (
+                        data.get("response", {})
+                            .get("body", {})
+                            .get("items", {})
+                            .get("item", [])
+                    )
 
                 if isinstance(items, dict):
                     items = [items]
@@ -431,11 +465,10 @@ def get_public_holidays():
                     desc = item.get("dateName")
                     if locdate and desc:
                         formatted = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
-                        try:
-                            cur.execute("INSERT OR IGNORE INTO public_holidays (date, description, source) VALUES (?, ?, ?)",
-                                        (formatted, desc, "api"))
-                        except Exception as e:
-                            print(f"❌ DB 삽입 실패: {formatted}, {desc}, error={e}")
+                        cur.execute(
+                            "INSERT OR IGNORE INTO public_holidays (date, description, source) VALUES (?, ?, ?)",
+                            (formatted, desc, "api")
+                        )
 
             except Exception as e:
                 print(f"❌ {month}월 공공 공휴일 호출 실패: {e}")
