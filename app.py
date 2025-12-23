@@ -464,13 +464,15 @@ def get_public_holidays():
 
                 for item in items:
                     locdate = item.get("locdate")
-                    desc = item.get("dateName")
-                    if locdate and desc:
-                        formatted = f"{locdate[:4]}-{locdate[4:6]}-{locdate[6:]}"
-                        cur.execute(
-                            "INSERT OR IGNORE INTO public_holidays (date, description, source) VALUES (?, ?, ?)",
-                            (formatted, desc, "api")
-                        )
+                desc = item.get("dateName")
+
+                if locdate and desc:
+                    locdate_str = str(locdate)  # ✅ int/str 모두 안전 처리
+                    formatted = f"{locdate_str[:4]}-{locdate_str[4:6]}-{locdate_str[6:8]}"
+                    cur.execute(
+                        "INSERT OR IGNORE INTO public_holidays (date, description, source) VALUES (?, ?, ?)",
+                        (formatted, desc, "api")
+                    )
 
             except Exception as e:
                 print(f"❌ {month}월 공공 공휴일 호출 실패: {e}")
