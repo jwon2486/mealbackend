@@ -423,7 +423,9 @@ def get_public_holidays():
                 "serviceKey": service_key,
                 "solYear": str(year),
                 "solMonth": f"{month:02d}",
-                "_type": "json",  # JSON 우선 요청 (지원 안 하면 XML이 올 수도 있음)
+                "numOfRows": "100",
+                "pageNo": "1",
+                "_type": "json",
             }
 
             try:
