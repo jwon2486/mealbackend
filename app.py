@@ -41,7 +41,7 @@ GITHUB_PATH   = "db.sqlite"                # 레포 안에서 파일 이름/경�
 GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN")
 GITHUB_API    = "https://api.github.com"
 
-kst_now = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
 
 def get_week_range_kst():
     now = datetime.now(KST).date()
@@ -281,7 +281,7 @@ def init_db():
             breakfast INTEGER,
             lunch INTEGER,
             dinner INTEGER,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
         );
     """)
     cursor.execute("""
@@ -2730,23 +2730,22 @@ def delete_visitor_entry(vid):
 
     if monday <= date_obj <= friday:
         cursor.execute("""
-            INSERT INTO visitor_logs (
-                applicant_id, applicant_name, date, reason, type,
-                before_breakfast, before_lunch, before_dinner,
-                breakfast, lunch, dinner, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            original["applicant_id"],
-            original["applicant_name"],
-            original["date"],
-            original["reason"],
-            original["type"],
-            original["breakfast"],
-            original["lunch"],
-            original["dinner"],
-            '삭제', '삭제', '삭제',
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ))
+        INSERT INTO visitor_logs (
+            applicant_id, applicant_name, date, reason, type,
+            before_breakfast, before_lunch, before_dinner,
+            breakfast, lunch, dinner
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        original["applicant_id"],
+        original["applicant_name"],
+        original["date"],
+        original["reason"],
+        original["type"],
+        original["breakfast"],
+        original["lunch"],
+        original["dinner"],
+        '삭제', '삭제', '삭제'
+    ))
 
     cursor.execute("DELETE FROM visitors WHERE id = ?", (vid,))
     conn.commit()
@@ -2827,14 +2826,10 @@ def check_visitor_duplicate():
 
 @app.route("/visitors/<int:visitor_id>", methods=["PUT"])
 def update_visitor(visitor_id):
-    """
-    ▸ 프런트가 보낸 필드만 수정하고,
-    ▸ 보내지 않은 식사 / reason 값은 그대로 유지한다.
-    """
     try:
-        data = request.json or {}                       # ① 요청 JSON (없으면 빈 dict)
+        data = request.json or {}
 
-        # ② 기존 레코드 조회 ───────────────────────────────
+        # 1) 기존 레코드 조회
         with sqlite3.connect(DATABASE) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
@@ -2845,71 +2840,72 @@ def update_visitor(visitor_id):
 
         old_b, old_l, old_d = original["breakfast"], original["lunch"], original["dinner"]
 
-        # ③ “보낸 필드만” 새 값 계산 ──────────────────────
+        # 2) 보낸 필드만 반영
         new_b = int(data["breakfast"]) if "breakfast" in data else old_b
         new_l = int(data["lunch"])     if "lunch"     in data else old_l
         new_d = int(data["dinner"])    if "dinner"    in data else old_d
         new_reason = data.get("reason", original["reason"]).strip()
 
-        # ④ 입력 검증 (해당 키가 있을 때만) ───────────────
         if "reason" in data and new_reason == "":
             return jsonify({"error": "사유를 입력하세요"}), 400
         if {"breakfast", "lunch", "dinner"} & data.keys() and (new_b + new_l + new_d) == 0:
             return jsonify({"error": "모든 수량이 0입니다"}), 400
 
-        # ⑤ UPDATE 구문 동적 생성 ────────────────────────
         fields, params = [], []
         for col, val in [("breakfast", new_b), ("lunch", new_l), ("dinner", new_d)]:
-            if col in data:                               # 실제로 전송된 컬럼만
+            if col in data:
                 fields.append(f"{col} = ?")
                 params.append(val)
-        if "reason" in data:                              # reason도 선택 업데이트
+
+        if "reason" in data:
             fields.append("reason = ?")
             params.append(new_reason)
 
-        # 전송된 필드가 아무것도 없으면 “변경 없음”
         if not fields:
             return jsonify({"message": "변경 없음"}), 200
 
         fields.append("last_modified = CURRENT_TIMESTAMP")
         params.append(visitor_id)
 
-        # ⑥ DB 반영 및 로그 기록 ─────────────────────────
+        # 3) UPDATE + (조건부) 로그 INSERT
         with sqlite3.connect(DATABASE) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
+
             cur.execute(f"UPDATE visitors SET {', '.join(fields)} WHERE id = ?", params)
 
-            # ✅ 금주(월~금) & 실제 값 변경 시에만 로그 저장 (대상 날짜 기준)
-        date_obj = datetime.strptime(original["date"], "%Y-%m-%d").date()
-
-        today = datetime.now(KST).date()
-        monday = today - timedelta(days=today.weekday())
-        friday = monday + timedelta(days=4)
-
-        changed = (old_b != new_b) or (old_l != new_l) or (old_d != new_d)
-
-        if changed and (monday <= date_obj <= friday):
-            cur.execute("""
-                INSERT INTO visitor_logs (
-                    applicant_id, applicant_name, date, type, reason,
-                    before_breakfast, before_lunch, before_dinner,
-                    breakfast, lunch, dinner, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                original["applicant_id"], original["applicant_name"],
-                original["date"], original["type"], new_reason,
-                old_b, old_l, old_d, new_b, new_l, new_d, kst_now
-            ))
-
+            # ✅ UPDATE는 항상 커밋되도록
             conn.commit()
+
+            # ✅ 금주 & 실제 값 변경일 때만 로그
+            date_obj = datetime.strptime(original["date"], "%Y-%m-%d").date()
+            today = datetime.now(KST).date()
+            monday = today - timedelta(days=today.weekday())
+            friday = monday + timedelta(days=4)
+
+            changed = (old_b != new_b) or (old_l != new_l) or (old_d != new_d)
+
+            if changed and (monday <= date_obj <= friday):
+                cur.execute("""
+                    INSERT INTO visitor_logs (
+                        applicant_id, applicant_name, date, type, reason,
+                        before_breakfast, before_lunch, before_dinner,
+                        breakfast, lunch, dinner
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    original["applicant_id"], original["applicant_name"],
+                    original["date"], original["type"], new_reason,
+                    old_b, old_l, old_d, new_b, new_l, new_d
+                ))
+                conn.commit()
 
         return jsonify({"message": "수정 완료"}), 200
 
     except Exception as e:
         print("❌ 방문자 수정 오류:", e)
         return jsonify({"error": "수정 실패"}), 500
+
 
 @app.route("/backup/test")
 def backup_test():
