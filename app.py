@@ -2748,7 +2748,7 @@ def delete_visitor_entry(vid):
         original["breakfast"],
         original["lunch"],
         original["dinner"],
-        0, 0, 0,
+        '삭제', '삭제', '삭제',
         now_kst_str()   # ✅ 여기
     ))
 
