@@ -281,7 +281,8 @@ def init_db():
             breakfast INTEGER,
             lunch INTEGER,
             dinner INTEGER,
-            updated_at TEXT DEFAULT (datetime('now','localtime'))
+            updated_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', '+9 hours')
+)
         );
     """)
     cursor.execute("""
