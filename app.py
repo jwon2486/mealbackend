@@ -29,6 +29,8 @@ import time
 
 
 KST = timezone(timedelta(hours=9))
+def now_kst_str():
+    return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE = os.path.join(BASE_DIR, "db.sqlite")
@@ -2734,8 +2736,9 @@ def delete_visitor_entry(vid):
         INSERT INTO visitor_logs (
             applicant_id, applicant_name, date, reason, type,
             before_breakfast, before_lunch, before_dinner,
-            breakfast, lunch, dinner
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            breakfast, lunch, dinner, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         original["applicant_id"],
         original["applicant_name"],
@@ -2745,7 +2748,8 @@ def delete_visitor_entry(vid):
         original["breakfast"],
         original["lunch"],
         original["dinner"],
-        '삭제', '삭제', '삭제'
+        0, 0, 0,
+        now_kst_str()   # ✅ 여기
     ))
 
     cursor.execute("DELETE FROM visitors WHERE id = ?", (vid,))
@@ -2891,13 +2895,18 @@ def update_visitor(visitor_id):
                     INSERT INTO visitor_logs (
                         applicant_id, applicant_name, date, type, reason,
                         before_breakfast, before_lunch, before_dinner,
-                        breakfast, lunch, dinner
+                        breakfast, lunch, dinner, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    original["applicant_id"], original["applicant_name"],
-                    original["date"], original["type"], new_reason,
-                    old_b, old_l, old_d, new_b, new_l, new_d
+                    original["applicant_id"],
+                    original["applicant_name"],
+                    original["date"],
+                    original["type"],
+                    new_reason,
+                    old_b, old_l, old_d,
+                    new_b, new_l, new_d,
+                    now_kst_str()   # ✅ 여기
                 ))
                 conn.commit()
 
