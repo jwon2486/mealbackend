@@ -26,6 +26,9 @@ from requests.adapters import HTTPAdapter
 import base64
 import threading
 import time
+import json, uuid
+from flask import send_from_directory
+from werkzeug.utils import secure_filename
 
 
 KST = timezone(timedelta(hours=9))
@@ -35,6 +38,11 @@ def now_kst_str():
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE = os.path.join(BASE_DIR, "db.sqlite")
 DB_PATH = "db.sqlite"
+MENU_UPLOAD_DIR = os.path.join(BASE_DIR, "uploads", "menu")
+MENU_MANIFEST_PATH = os.path.join(MENU_UPLOAD_DIR, "menu_board.json")
+MENU_ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+MENU_MAX_MB = 20  # 필요하면 조정
+os.makedirs(MENU_UPLOAD_DIR, exist_ok=True)
 
 # ===== GitHub 백업 설정 =====
 GITHUB_REPO   = "jwon2486/MealDB-Backup"   # 새로 만든 백업 레포
@@ -169,10 +177,37 @@ def backup_worker_midnight():
         except Exception as e:
             print("❌ [백업] 8시 백업 중 오류:", e)
 
+def load_menu_manifest():
+    if not os.path.exists(MENU_MANIFEST_PATH):
+        return []
 
+    try:
+        with open(MENU_MANIFEST_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception as e:
+        print("❌ menu manifest 읽기 실패:", e)
+        return []
+
+
+def save_menu_manifest(items):
+    try:
+        with open(MENU_MANIFEST_PATH, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print("❌ menu manifest 저장 실패:", e)
+        return False
+
+
+def allowed_menu_file(filename):
+    ext = os.path.splitext(filename)[1].lower()
+    return ext in MENU_ALLOWED_EXT
 
 # Flask 앱 생성
 app = Flask(__name__)
+
+app.secret_key = os.environ.get("SECRET_KEY")
 
 
 # 모든 도메인에서 CORS 허용 (프론트엔드가 localhost:3000 등에 있어도 접근 가능)
@@ -333,7 +368,126 @@ def download_database():
         return "DB 파일이 존재하지 않습니다.", 404
 
 
+# 업로드된 식단표 이미지 제공
+@app.route("/uploads/menu/<path:filename>", methods=["GET"])
+def serve_menu_upload(filename):
+    return send_from_directory(MENU_UPLOAD_DIR, filename)
 
+
+# 식단표 게시판 목록 조회
+@app.route("/api/menu-board", methods=["GET"])
+def get_menu_board():
+    items = load_menu_manifest()
+
+    result = []
+    for item in items:
+        result.append({
+            "id": item.get("id"),
+            "title": item.get("title", ""),
+            "filename": item.get("filename", ""),
+            "image_url": f"/uploads/menu/{item.get('filename', '')}"
+        })
+
+    return jsonify(result), 200
+
+
+# 식단표 업로드
+@app.route("/api/menu-board/upload", methods=["POST"])
+def upload_menu_board():
+    try:
+        if "image" not in request.files:
+            return jsonify({"error": "이미지 파일이 없습니다."}), 400
+
+        file = request.files["image"]
+        title = request.form.get("title", "").strip()
+
+        if not file or not file.filename:
+            return jsonify({"error": "선택된 파일이 없습니다."}), 400
+
+        if not allowed_menu_file(file.filename):
+            return jsonify({"error": "jpg, jpeg, png, webp 파일만 업로드할 수 있습니다."}), 400
+
+        file.seek(0, os.SEEK_END)
+        size_bytes = file.tell()
+        file.seek(0)
+
+        if size_bytes > MENU_MAX_MB * 1024 * 1024:
+            return jsonify({"error": f"최대 {MENU_MAX_MB}MB까지 업로드할 수 있습니다."}), 400
+
+        ext = os.path.splitext(file.filename)[1].lower()
+        item_id = uuid.uuid4().hex[:8]
+        saved_name = f"menu_{item_id}{ext}"
+        save_path = os.path.join(MENU_UPLOAD_DIR, saved_name)
+
+        file.save(save_path)
+
+        items = load_menu_manifest()
+        new_item = {
+            "id": item_id,
+            "title": title if title else file.filename,
+            "filename": saved_name
+        }
+
+        items.insert(0, new_item)
+
+        if not save_menu_manifest(items):
+            if os.path.exists(save_path):
+                os.remove(save_path)
+            return jsonify({"error": "목록 저장 실패"}), 500
+
+        return jsonify({
+            "message": "업로드 완료",
+            "item": {
+                "id": new_item["id"],
+                "title": new_item["title"],
+                "filename": new_item["filename"],
+                "image_url": f"/uploads/menu/{new_item['filename']}"
+            }
+        }), 201
+
+    except Exception as e:
+        print("❌ 식단표 업로드 실패:", e)
+        return jsonify({"error": "업로드 실패"}), 500
+
+
+# 식단표 선택 삭제
+@app.route("/api/menu-board/delete", methods=["POST"])
+def delete_menu_board():
+    try:
+        data = request.get_json()
+        ids = data.get("ids", [])
+
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"error": "삭제할 항목이 없습니다."}), 400
+
+        items = load_menu_manifest()
+        remain = []
+        deleted_count = 0
+
+        for item in items:
+            if item.get("id") in ids:
+                filename = item.get("filename")
+                if filename:
+                    file_path = os.path.join(MENU_UPLOAD_DIR, filename)
+                    if os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                        except Exception as e:
+                            print("❌ 이미지 파일 삭제 실패:", e)
+                deleted_count += 1
+            else:
+                remain.append(item)
+
+        if not save_menu_manifest(remain):
+            return jsonify({"error": "삭제 후 목록 저장 실패"}), 500
+
+        return jsonify({
+            "message": f"{deleted_count}건 삭제 완료"
+        }), 200
+
+    except Exception as e:
+        print("❌ 식단표 삭제 실패:", e)
+        return jsonify({"error": "삭제 실패"}), 500
 
 
 
@@ -2948,7 +3102,7 @@ if __name__ == "__main__":
     #alter_meals_table_unique_key()
     # alter_employees_add_type()  # ✅ 여기에 추가하세요
 
-    # import os                                #실제사용
+    
     port = int(os.environ.get("PORT", 5000)) #실제사용
     app.run(host="0.0.0.0", port=port)       #실제사용
 
