@@ -154,28 +154,48 @@ KST = timezone(timedelta(hours=9))
 
 def backup_worker_midnight():
     """
-    매일 오전8시(한국 시간 기준)에 DB 백업을 실행하는 워커
+    매일 08시를 기점으로 3시간 간격(08, 11, 14, 17, 20, 23, 02, 05시)마다
+    정해진 시각에 DB 백업을 실행하는 워커 (이름 유지)
     """
     while True:
-        # 현재 KST 시간
+        # 현재 한국 시간 기준 시각 확인
         now_kst = datetime.now(KST)
-
-        # 다음 오전8시(KST) 계산
-        next_run_kst = (now_kst + timedelta(days=1)).replace(
-            hour=8, minute=0, second=0, microsecond=0
-        )
+        
+        # 08시 기준 3시간 간격 목표 시각 리스트
+        target_hours = [2, 5, 8, 11, 14, 17, 20, 23]
+        
+        # 현재 시각보다 큰 가장 가까운 목표 시각 찾기
+        next_hour = next((h for h in target_hours if h > now_kst.hour), target_hours[0])
+        
+        # 다음 실행 날짜 및 시각 계산
+        if next_hour <= now_kst.hour:
+            # 리스트가 순환하여 다음 날로 넘어가는 경우 (예: 23시 이후 02시)
+            next_run_kst = (now_kst + timedelta(days=1)).replace(
+                hour=next_hour, minute=0, second=0, microsecond=0
+            )
+        else:
+            # 오늘 남은 목표 시각 중 가장 빠른 시각
+            next_run_kst = now_kst.replace(
+                hour=next_hour, minute=0, second=0, microsecond=0
+            )
+            
         wait_seconds = (next_run_kst - now_kst).total_seconds()
 
-        print(f"🕛 [백업] 다음 실행 예정(KST): {next_run_kst} (대기 {int(wait_seconds)}초)")
+        print(f"🕛 [백업] 다음 예약 실행(KST): {next_run_kst.strftime('%Y-%m-%d %H:%M:%S')} (대기 {int(wait_seconds)}초)")
+        
+        # 목표 시각까지 대기
         if wait_seconds > 0:
             time.sleep(wait_seconds)
 
-        # 8시에 백업 실행
+        # 정해진 시간에 백업 실행
         try:
-            print("⏱ [백업]8시 DB 백업 실행(KST) ...")
+            print(f"⏱ [백업] {next_run_kst.hour}시 정기 DB 백업 실행(KST) ...")
             backup_db_to_github()
         except Exception as e:
-            print("❌ [백업] 8시 백업 중 오류:", e)
+            print(f"❌ [백업] {next_run_kst.hour}시 백업 중 오류:", e)
+        
+        # 중복 실행 방지를 위해 잠시 대기
+        time.sleep(1)
 
 def load_menu_manifest():
     if not os.path.exists(MENU_MANIFEST_PATH):
@@ -213,15 +233,6 @@ app.secret_key = os.environ.get("SECRET_KEY")
 # 모든 도메인에서 CORS 허용 (프론트엔드가 localhost:3000 등에 있어도 접근 가능)
 CORS(app) #프론트와 연동
 
-# ---- 여기 추가 ----
-# 앱 프로세스가 시작될 때 1시간마다 백업하는 워커 스레드 시작
-backup_thread = threading.Thread(
-    target=backup_worker,
-    args=(1 * 60 * 60,),   # 1시간 = 3600초 (원하면 24시간 등으로 조절)
-    daemon=True
-)
-backup_thread.start()
-# -------------------
 
 # ✅ SQLite 데이터베이스 연결 함수
 def get_db_connection():
