@@ -1620,7 +1620,7 @@ def compare_auto():
         # 2. 업로드된 실적 엑셀 읽기 및 전처리
         df_actual = pd.read_excel(file_actual)
         # ✅ '조직' 열이 있으면 '부서'로 이름 변경
-        if '조직' in df_actual.columns:
+    if '조직' in df_actual.columns:
         df_actual = df_actual.rename(columns={'조직': '부서'})
         # 이름 공백 제거 (매칭률 향상을 위해 main.py 로직 적용)
         df_actual['이름'] = df_actual['이름'].astype(str).apply(lambda x: re.sub(r'\s+', '', x))
