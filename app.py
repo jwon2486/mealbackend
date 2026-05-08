@@ -3081,6 +3081,81 @@ def update_visitor(visitor_id):
         print("❌ 방문자 수정 오류:", e)
         return jsonify({"error": "수정 실패"}), 500
 
+    @app.route('/admin/stats/compare-auto', methods=['POST'])
+    def compare_auto():
+        # 1. 파일 업로드 확인
+        if 'actual' not in request.files:
+            return jsonify({"error": "실적 자료(엑셀) 파일이 필요합니다."}), 400
+        
+        file_actual = request.files['actual']
+        partner_depts = ['DEX', 'FBF-ENG', '하이테크주택', '신명전력', '주노텍']
+
+        try:
+            # 2. 실적 자료 읽기 및 전처리 (main.py 로직)
+            df_actual = pd.read_excel(file_actual)
+            df_actual['이름'] = df_actual['이름'].astype(str).apply(lambda x: re.sub(r'\s+', '', x))
+            df_actual['식사일자'] = pd.to_datetime(df_actual['식사일자']).dt.strftime('%Y-%m-%d')
+            
+            # 날짜 범위 추출 (DB 조회를 위함)
+            start_date = df_actual['식사일자'].min()
+            end_date = df_actual['식사일자'].max()
+
+            # 3. DB에서 신청 데이터 가져오기
+            conn = sqlite3.connect(DATABASE)
+            query = """
+                SELECT m.date as 식사일자, e.name as 이름, e.dept as 부서,
+                    m.breakfast, m.lunch, m.dinner
+                FROM meals m
+                JOIN employees e ON m.user_id = e.id
+                WHERE m.date BETWEEN ? AND ?
+            """
+            df_db = pd.read_sql_query(query, conn, params=(start_date, end_date))
+            conn.close()
+
+            # 4. DB 데이터를 비교 가능한 포맷으로 변환 (Unpivot)
+            applied_rows = []
+            for _, row in df_db.iterrows():
+                if row['breakfast'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': row['이름'], '부서': row['부서'], '식사구분': '조식'})
+                if row['lunch'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': row['이름'], '부서': row['부서'], '식사구분': '중식'})
+                if row['dinner'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': row['이름'], '부서': row['부서'], '식사구분': '석식'})
+            
+            df_applied = pd.DataFrame(applied_rows)
+            df_applied['이름'] = df_applied['이름'].apply(lambda x: re.sub(r'\s+', '', x))
+
+            # 5. 핵심 비교 분석 (main.py 로직)
+            # 노쇼 (신청O, 실적X)
+            no_show = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='left', indicator=True)
+            no_show = no_show[no_show['_merge'] == 'left_only'].drop(columns=['_merge', '부서_y']).rename(columns={'부서_x': '부서'})
+
+            # 미신청 (신청X, 실적O)
+            unreg = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='right', indicator=True)
+            unreg = unreg[unreg['_merge'] == 'right_only'].drop(columns=['_merge', '부서_x']).rename(columns={'부서_y': '부서'})
+
+            # 협력사 요약
+            partner_summary = df_actual[df_actual['부서'].isin(partner_depts)].groupby(['식사일자', '부서', '식사구분']).size().reset_index(name='인원수')
+
+            # 6. 엑셀 생성 (BytesIO)
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                no_show.to_excel(writer, sheet_name='노쇼 명단', index=False)
+                unreg.to_excel(writer, sheet_name='미신청 식사', index=False)
+                partner_summary.to_excel(writer, sheet_name='협력사 식사 현황', index=False)
+
+                # 중앙 정렬 서식 적용
+                for sheet_name in writer.sheets:
+                    ws = writer.sheets[sheet_name]
+                    for row in ws.iter_rows():
+                        for cell in row:
+                            cell.alignment = Alignment(horizontal='center')
+
+            output.seek(0)
+            return send_file(output, as_attachment=True, 
+                            download_name=f"Comparison_{start_date}_{end_date}.xlsx",
+                            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
 
 @app.route("/backup/test")
 def backup_test():
