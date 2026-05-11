@@ -13,6 +13,7 @@ from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from collections import defaultdict
 from io import BytesIO
+from flask_cors import CORS
 import io
 import calendar
 import sqlite3
