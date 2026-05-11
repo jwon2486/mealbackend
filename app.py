@@ -1703,9 +1703,37 @@ def compare_auto():
                         cell.alignment = Alignment(horizontal='center', vertical='center')
 
         output.seek(0)
-        return send_file(output, as_attachment=True, 
-                         download_name=f"Meal_Analysis_{start_date}_{end_date}.xlsx",
-                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+        # --- ✨ 여기서부터 핵심 추가 로직: GUI를 위한 요약 데이터 생성 ✨ ---
+        summary_data = {
+            "no_show_count": len(no_show),
+            "unreg_count": len(unreg),
+            "partner_count": int(partner_summary['인원수'].sum()) if not partner_summary.empty else 0,
+            "start_date": start_date,
+            "end_date": end_date,
+            # 너무 큰 데이터로 헤더 오류가 나는 것을 방지하기 위해 명단은 상위 200건씩만 전달
+            "no_show_list": no_show.head(200).to_dict(orient='records'),
+            "unreg_list": unreg.head(200).to_dict(orient='records')
+        }
+        
+        # JSON 문자열로 변환 (한글 깨짐 방지)
+        summary_json = json.dumps(summary_data, ensure_ascii=False)
+
+        # 파일 응답 객체 생성
+        response = send_file(
+            output, 
+            as_attachment=True, 
+            download_name=f"Meal_Analysis_{start_date}_{end_date}.xlsx",
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+
+        # 커스텀 헤더에 JSON 데이터 추가
+        response.headers['X-Analysis-Summary'] = summary_json
+        # 브라우저 JS가 이 헤더에 접근할 수 있도록 허용
+        response.headers['Access-Control-Expose-Headers'] = 'X-Analysis-Summary'
+        
+        return response
+        # --- ✨ 추가 로직 끝 ✨ ---
 
     except Exception as e:
         print(f"❌ 분석 오류: {e}")
