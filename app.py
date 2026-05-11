@@ -231,7 +231,10 @@ app = Flask(__name__)
 
 app.secret_key = os.environ.get("SECRET_KEY")
 
-CORS(app)
+CORS(app, resources={r"/*": {
+    "origins": ["http://127.0.0.1:5500", "https://mealfrontend.onrender.com"],
+    "expose_headers": ["X-Analysis-Summary"]  # JS가 분석 결과를 읽을 수 있게 해줍니다.
+}})
 
 
 
