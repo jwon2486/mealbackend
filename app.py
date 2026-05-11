@@ -13,7 +13,6 @@ from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from collections import defaultdict
 from io import BytesIO
-from flask_cors import CORS
 import io
 import calendar
 import sqlite3
@@ -31,6 +30,7 @@ import time
 import json, uuid
 from flask import send_from_directory
 from werkzeug.utils import secure_filename
+CORS(app)
 
 
 KST = timezone(timedelta(hours=9))
@@ -231,9 +231,6 @@ app = Flask(__name__)
 
 app.secret_key = os.environ.get("SECRET_KEY")
 
-
-# 모든 도메인에서 CORS 허용 (프론트엔드가 localhost:3000 등에 있어도 접근 가능)
-CORS(app) #프론트와 연동
 
 
 # ✅ SQLite 데이터베이스 연결 함수
