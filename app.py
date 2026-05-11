@@ -1612,26 +1612,24 @@ def get_stats_period():
 def compare_auto():
     # 1. 파일 수신 확인
     if 'actual' not in request.files:
-        return jsonify({"error": "실적 자료(엑셀) 파일이 필요합니다."}),
+        return jsonify({"error": "실적 자료(엑셀) 파일이 필요합니다."}), 400
     
     file_actual = request.files['actual']
-    # 협력사 부서 리스트 (필요에 따라 수정)
+    # 협력사 부서 리스트
     partner_depts = ['DEX', 'FBF-ENG', '하이테크주택', '신명전력', '주노텍']
 
     def clean_name(name):
-        """이름 전처리: 공백 제거 및 동명이인 식별자(a, 1 등) 제거"""
+        """이름 전처리: 공백 제거 및 동명이인 식별자 제거"""
         if not name: return ""
         name = str(name).strip()
         name = re.sub(r'\s+', '', name)
-        # 한글 이름(2~4자) 뒤에 붙은 영문자나 숫자 1자리 제거
         name = re.sub(r'([가-힣]{2,4})[a-zA-Z0-9]$', r'\1', name)
         return name
 
     def clean_dept(dept):
-        """부서명 전처리: 괄호와 그 안의 내용 제거 (예: 고객팀(유상) -> 고객팀)"""
+        """부서명 전처리: 괄호 제거 (예: 고객팀(유상) -> 고객팀)"""
         if not dept: return ""
         dept = str(dept).strip()
-        # 괄호와 괄호 안의 모든 내용을 제거하는 정규식
         dept = re.sub(r'\(.*?\)', '', dept).strip()
         return dept
 
@@ -1644,8 +1642,8 @@ def compare_auto():
         if '조직' in df_actual.columns:
             df_actual.rename(columns={'조직': '부서'}, inplace=True)
 
-        # 실적 데이터 이름/날짜/부서 전처리
-        df_actual['부서'] = df_actual['부서'].apply(clean_dept) # ✅ 부서 통합 로직 적용
+        # 실적 데이터 전처리
+        df_actual['부서'] = df_actual['부서'].apply(clean_dept)
         df_actual['이름'] = df_actual['이름'].apply(clean_name)
         df_actual['식사일자'] = pd.to_datetime(df_actual['식사일자']).dt.strftime('%Y-%m-%d')
         
@@ -1666,38 +1664,49 @@ def compare_auto():
         conn.close()
 
         # DB 데이터 부서 전처리
-        df_db['부서'] = df_db['부서'].apply(clean_dept) # ✅ DB 부서도 통합하여 매칭률 향상
+        df_db['부서'] = df_db['부서'].apply(clean_dept)
 
-        # 4. DB 데이터 변환 (Long Format)
+        # 4. DB 신청 데이터 변환 (Long Format)
         applied_rows = []
         for _, row in df_db.iterrows():
-            clean_db_name = clean_name(row['이름'])
-            if row['breakfast'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '조식'})
-            if row['lunch'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '중식'})
-            if row['dinner'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '석식'})
+            c_name = clean_name(row['이름'])
+            if row['breakfast'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': c_name, '부서': row['부서'], '식사구분': '조식'})
+            if row['lunch'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': c_name, '부서': row['부서'], '식사구분': '중식'})
+            if row['dinner'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': c_name, '부서': row['부서'], '식사구분': '석식'})
         
         df_applied = pd.DataFrame(applied_rows)
 
         # 5. 데이터 대조 분석 (Merge)
-        # ① 노쇼 분석 (DB에는 있으나 실적에는 없는 경우)
+        # ① 노쇼 분석 (신청O, 실적X)
         no_show = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='left', indicator=True)
         no_show = no_show[no_show['_merge'] == 'left_only'].drop(columns=['_merge'])
-        if '부서_y' in no_show.columns: no_show = no_show.drop(columns=['부서_y']).rename(columns={'부서_x': '부서'})
+        if '부서_y' in no_show.columns: 
+            no_show = no_show.drop(columns=['부서_y']).rename(columns={'부서_x': '부서'})
+        
+        # ✅ 컬럼 순서 강제 고정 (노쇼)
+        no_show = no_show[['식사일자', '이름', '부서', '식사구분']]
 
-        # ② 미신청 식사 분석 (실적에는 있으나 DB에는 없는 경우)
+        # ② 미신청 식사 분석 (신청X, 실적O)
         unreg = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='right', indicator=True)
         unreg = unreg[unreg['_merge'] == 'right_only'].drop(columns=['_merge'])
-        if '부서_x' in unreg.columns: unreg = unreg.drop(columns=['부서_x']).rename(columns={'부서_y': '부서'})
+        if '부서_x' in unreg.columns: 
+            unreg = unreg.drop(columns=['부서_x']).rename(columns={'부서_y': '부서'})
         
-        # 미신청 명단에서 협력사 제거
+        # 협력사 제외
         if '부서' in unreg.columns:
             unreg = unreg[~unreg['부서'].isin(partner_depts)]
+        
+        # ✅ 컬럼 순서 강제 고정 (미신청: 노쇼와 동일하게 맞춤)
+        unreg = unreg[['식사일자', '이름', '부서', '식사구분']]
 
         # ③ 협력사 요약 현황
         if '부서' in df_actual.columns:
             partner_summary = df_actual[df_actual['부서'].isin(partner_depts)].groupby(['식사일자', '부서', '식사구분']).size().reset_index(name='인원수')
         else:
             partner_summary = pd.DataFrame(columns=['식사일자', '부서', '식사구분', '인원수'])
+        
+        # ✅ 협력사 컬럼 순서 고정
+        partner_summary = partner_summary[['식사일자', '부서', '식사구분', '인원수']]
 
         # 6. 결과 엑셀 파일 생성 (바이너리)
         output = io.BytesIO()
@@ -1706,19 +1715,10 @@ def compare_auto():
             unreg.to_excel(writer, sheet_name='미신청 식사', index=False)
             partner_summary.to_excel(writer, sheet_name='협력사 식사 현황', index=False)
 
-            from openpyxl.styles import Alignment
-            for sheet_name in writer.sheets:
-                ws = writer.sheets[sheet_name]
-                for row in ws.iter_rows():
-                    for cell in row:
-                        cell.alignment = Alignment(horizontal='center', vertical='center')
-
         output.seek(0)
-        
-        # 엑셀 바이너리 데이터를 Base64로 인코딩 (방대한 데이터 대응)
         excel_base64 = base64.b64encode(output.getvalue()).decode('utf-8')
 
-        # 7. 최종 JSON 응답 (GUI 데이터 + 엑셀 파일 문자열)
+        # 7. 최종 JSON 응답
         return jsonify({
             "success": True,
             "summary": {
@@ -1727,11 +1727,12 @@ def compare_auto():
                 "partner_count": int(partner_summary['인원수'].sum()) if not partner_summary.empty else 0,
                 "start_date": start_date,
                 "end_date": end_date,
-                "no_show_list": no_show.to_dict(orient='records'), # 전체 명단 전송
-                "unreg_list": unreg.to_dict(orient='records')     # 전체 명단 전송
+                "no_show_list": no_show.to_dict(orient='records'),
+                "unreg_list": unreg.to_dict(orient='records'),
+                "partner_list": partner_summary.to_dict(orient='records')
             },
             "excel_file": excel_base64,
-            "file_name": f"Meal_Analysis_{start_date}_{end_date}.xlsx"
+            "file_name": f"식수비교_{start_date}_{end_date}.xlsx"
         })
 
     except Exception as e:
