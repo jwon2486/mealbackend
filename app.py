@@ -226,14 +226,17 @@ def allowed_menu_file(filename):
     ext = os.path.splitext(filename)[1].lower()
     return ext in MENU_ALLOWED_EXT
 
-# Flask 앱 생성
-app = Flask(__name__)
+# app.py 상단 수정
 
+# 1. Flask 앱 인스턴스를 먼저 생성
+app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY")
 
+# 2. 생성된 app을 인자로 CORS 설정 (상세 설정 포함)
+from flask_cors import CORS
 CORS(app, resources={r"/*": {
     "origins": ["http://127.0.0.1:5500", "https://mealfrontend.onrender.com"],
-    "expose_headers": ["X-Analysis-Summary"]  # JS가 분석 결과를 읽을 수 있게 해줍니다.
+    "expose_headers": ["X-Analysis-Summary"]  # JS가 분석 결과 헤더를 읽을 수 있도록 허용
 }})
 
 
