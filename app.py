@@ -30,7 +30,7 @@ import time
 import json, uuid
 from flask import send_from_directory
 from werkzeug.utils import secure_filename
-CORS(app)
+
 
 
 KST = timezone(timedelta(hours=9))
@@ -230,6 +230,8 @@ def allowed_menu_file(filename):
 app = Flask(__name__)
 
 app.secret_key = os.environ.get("SECRET_KEY")
+
+CORS(app)
 
 
 
