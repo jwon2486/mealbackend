@@ -1610,41 +1610,42 @@ def get_stats_period():
 
 @app.route('/admin/stats/compare-auto', methods=['POST'])
 def compare_auto():
-    # 1. 파일 수신 확인
     if 'actual' not in request.files:
         return jsonify({"error": "실적 자료(엑셀) 파일이 필요합니다."}), 400
     
     file_actual = request.files['actual']
-    # 협력사 부서 리스트
     partner_depts = ['DEX', 'FBF-ENG', '하이테크주택', '신명전력', '주노텍']
 
     def clean_name(name):
-        """이름 전처리: 공백 제거 및 동명이인 식별자(a, 1 등) 제거"""
+        """이름 전처리: 공백 제거 및 동명이인 식별자 제거"""
         if not name: return ""
-        name = str(name).strip()
-        name = re.sub(r'\s+', '', name)
-        # 한글 이름(2~4자) 뒤에 붙은 영문자나 숫자 1자리 제거 (예: 홍길동a -> 홍길동)
+        name = str(name).strip().replace(" ", "")
         name = re.sub(r'([가-힣]{2,4})[a-zA-Z0-9]$', r'\1', name)
         return name
 
+    def clean_dept(dept):
+        """부서명 전처리: 괄호와 그 안의 내용 제거 (예: 고객팀(유상) -> 고객팀)"""
+        if not dept: return ""
+        dept = str(dept).strip()
+        # 괄호와 괄호 안의 모든 내용을 제거하는 정규식
+        dept = re.sub(r'\(.*?\)', '', dept).strip()
+        return dept
+
     try:
-        # 2. 업로드된 실적 엑셀 읽기
         df_actual = pd.read_excel(file_actual, engine='openpyxl')
-        
-        # 열 이름 정규화 및 '조직' -> '부서' 변경
         df_actual.columns = df_actual.columns.str.strip()
+        
         if '조직' in df_actual.columns:
             df_actual.rename(columns={'조직': '부서'}, inplace=True)
 
-        # 실적 데이터 이름/날짜 전처리
+        # ✅ 부서명 전처리 적용 (실적 데이터)
+        df_actual['부서'] = df_actual['부서'].apply(clean_dept)
         df_actual['이름'] = df_actual['이름'].apply(clean_name)
         df_actual['식사일자'] = pd.to_datetime(df_actual['식사일자']).dt.strftime('%Y-%m-%d')
         
-        # 분석 기간 추출
         start_date = df_actual['식사일자'].min()
         end_date = df_actual['식사일자'].max()
 
-        # 3. DB에서 신청 데이터 조회
         conn = sqlite3.connect(DATABASE)
         query = """
             SELECT m.date as 식사일자, e.name as 이름, e.dept as 부서,
@@ -1656,32 +1657,32 @@ def compare_auto():
         df_db = pd.read_sql_query(query, conn, params=(start_date, end_date))
         conn.close()
 
-        # 4. DB 데이터 변환 (DB 이름도 동일하게 정규화하여 매칭률 향상)
+        # ✅ 부서명 전처리 적용 (DB 데이터)
+        df_db['부서'] = df_db['부서'].apply(clean_dept)
+
         applied_rows = []
         for _, row in df_db.iterrows():
             clean_db_name = clean_name(row['이름'])
+            # 부서는 위에서 이미 clean_dept가 적용됨
             if row['breakfast'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '조식'})
             if row['lunch'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '중식'})
             if row['dinner'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '석식'})
         
         df_applied = pd.DataFrame(applied_rows)
 
-        # 5. 데이터 대조 분석 (Merge)
-        # ① 노쇼 분석 (DB에는 있으나 실적에는 없는 경우)
+        # 5. 데이터 대조 분석 (Merge) - 이제 부서명이 통합되어 정확히 매칭됨
         no_show = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='left', indicator=True)
         no_show = no_show[no_show['_merge'] == 'left_only'].drop(columns=['_merge'])
         if '부서_y' in no_show.columns: no_show = no_show.drop(columns=['부서_y']).rename(columns={'부서_x': '부서'})
 
-        # ② 미신청 식사 분석 (실적에는 있으나 DB에는 없는 경우)
         unreg = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='right', indicator=True)
         unreg = unreg[unreg['_merge'] == 'right_only'].drop(columns=['_merge'])
         if '부서_x' in unreg.columns: unreg = unreg.drop(columns=['부서_x']).rename(columns={'부서_y': '부서'})
         
-        # 미신청 명단에서 협력사 제거 (일반 직원만 남김)
         if '부서' in unreg.columns:
             unreg = unreg[~unreg['부서'].isin(partner_depts)]
 
-        # ③ 협력사 요약 현황
+        # ③ 협력사 요약 현황 (부서가 통합된 상태로 그룹화됨)
         if '부서' in df_actual.columns:
             partner_summary = df_actual[df_actual['부서'].isin(partner_depts)].groupby(['식사일자', '부서', '식사구분']).size().reset_index(name='인원수')
         else:
@@ -1694,7 +1695,6 @@ def compare_auto():
             unreg.to_excel(writer, sheet_name='미신청 식사', index=False)
             partner_summary.to_excel(writer, sheet_name='협력사 식사 현황', index=False)
 
-            # 중앙 정렬 서식 적용
             from openpyxl.styles import Alignment
             for sheet_name in writer.sheets:
                 ws = writer.sheets[sheet_name]
@@ -1703,9 +1703,31 @@ def compare_auto():
                         cell.alignment = Alignment(horizontal='center', vertical='center')
 
         output.seek(0)
-        return send_file(output, as_attachment=True, 
-                         download_name=f"Meal_Analysis_{start_date}_{end_date}.xlsx",
-                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+        # GUI용 요약 데이터 생성
+        summary_data = {
+            "no_show_count": len(no_show),
+            "unreg_count": len(unreg),
+            "partner_count": int(partner_summary['인원수'].sum()) if not partner_summary.empty else 0,
+            "start_date": start_date,
+            "end_date": end_date,
+            "no_show_list": no_show.head(200).to_dict(orient='records'),
+            "unreg_list": unreg.head(200).to_dict(orient='records')
+        }
+        
+        summary_json = json.dumps(summary_data, ensure_ascii=False)
+
+        response = send_file(
+            output, 
+            as_attachment=True, 
+            download_name=f"Meal_Analysis_{start_date}_{end_date}.xlsx",
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+
+        response.headers['X-Analysis-Summary'] = summary_json
+        response.headers['Access-Control-Expose-Headers'] = 'X-Analysis-Summary'
+        
+        return response
 
     except Exception as e:
         print(f"❌ 분석 오류: {e}")
