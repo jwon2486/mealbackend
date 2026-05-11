@@ -1615,7 +1615,8 @@ def compare_auto():
         return jsonify({"error": "실적 자료(엑셀) 파일이 필요합니다."}), 400
     
     file_actual = request.files['actual']
-    # 협력사 부서 리스트
+    
+    # 협력사 부서 리스트 (미신청 명단 필터링용)
     partner_depts = ['DEX', 'FBF-ENG', '하이테크주택', '신명전력', '주노텍']
 
     def clean_name(name):
@@ -1627,24 +1628,33 @@ def compare_auto():
         name = re.sub(r'([가-힣]{2,4})[a-zA-Z0-9]$', r'\1', name)
         return name
 
+    def clean_dept(dept):
+        """부서명 전처리: 괄호 및 괄호 안의 내용 삭제 (예: 제어시스템(설계) -> 제어시스템)"""
+        if not dept: return ""
+        dept = str(dept).strip()
+        # 괄호와 그 안의 문자를 모두 제거
+        dept = re.sub(r'\(.*?\)', '', dept)
+        return dept.strip()
+
     try:
         # 2. 업로드된 실적 엑셀 읽기
         df_actual = pd.read_excel(file_actual, engine='openpyxl')
         
-        # 열 이름 정규화 및 '조직' -> '부서' 변경
+        # 열 이름 정규화 및 '조직' -> '부서' 통합
         df_actual.columns = df_actual.columns.str.strip()
         if '조직' in df_actual.columns:
             df_actual.rename(columns={'조직': '부서'}, inplace=True)
 
-        # 실적 데이터 이름/날짜 전처리
+        # 실적 데이터 전처리 (이름, 부서, 날짜)
         df_actual['이름'] = df_actual['이름'].apply(clean_name)
+        df_actual['부서'] = df_actual['부서'].apply(clean_dept)
         df_actual['식사일자'] = pd.to_datetime(df_actual['식사일자']).dt.strftime('%Y-%m-%d')
         
-        # 분석 기간 추출
+        # 분석 기간 자동 추출
         start_date = df_actual['식사일자'].min()
         end_date = df_actual['식사일자'].max()
 
-        # 3. DB에서 신청 데이터 조회
+        # 3. DB에서 해당 기간의 신청 데이터 조회
         conn = sqlite3.connect(DATABASE)
         query = """
             SELECT m.date as 식사일자, e.name as 이름, e.dept as 부서,
@@ -1656,36 +1666,48 @@ def compare_auto():
         df_db = pd.read_sql_query(query, conn, params=(start_date, end_date))
         conn.close()
 
-        # 4. DB 데이터 변환 (DB 이름도 동일하게 정규화하여 매칭률 향상)
+        # 4. DB 데이터 변환 및 정규화 (이름/부서 매칭률 극대화)
         applied_rows = []
         for _, row in df_db.iterrows():
             clean_db_name = clean_name(row['이름'])
-            if row['breakfast'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '조식'})
-            if row['lunch'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '중식'})
-            if row['dinner'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '석식'})
+            clean_db_dept = clean_dept(row['부서'])
+            
+            if row['breakfast'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': clean_db_dept, '식사구분': '조식'})
+            if row['lunch'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': clean_db_dept, '식사구분': '중식'})
+            if row['dinner'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': clean_db_dept, '식사구분': '석식'})
         
         df_applied = pd.DataFrame(applied_rows)
 
-        # 5. 데이터 대조 분석 (Merge)
-        # ① 노쇼 분석 (DB에는 있으나 실적에는 없는 경우)
+        # 5. 데이터 대조 분석
+        # ① 노쇼 분석
         no_show = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='left', indicator=True)
         no_show = no_show[no_show['_merge'] == 'left_only'].drop(columns=['_merge'])
         if '부서_y' in no_show.columns: no_show = no_show.drop(columns=['부서_y']).rename(columns={'부서_x': '부서'})
 
-        # ② 미신청 식사 분석 (실적에는 있으나 DB에는 없는 경우)
+        # ② 미신청 식사 분석 (협력사 제외)
         unreg = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='right', indicator=True)
         unreg = unreg[unreg['_merge'] == 'right_only'].drop(columns=['_merge'])
         if '부서_x' in unreg.columns: unreg = unreg.drop(columns=['부서_x']).rename(columns={'부서_y': '부서'})
-        
-        # 미신청 명단에서 협력사 제거 (일반 직원만 남김)
         if '부서' in unreg.columns:
             unreg = unreg[~unreg['부서'].isin(partner_depts)]
 
         # ③ 협력사 요약 현황
+        partner_total = 0
         if '부서' in df_actual.columns:
-            partner_summary = df_actual[df_actual['부서'].isin(partner_depts)].groupby(['식사일자', '부서', '식사구분']).size().reset_index(name='인원수')
+            partner_df = df_actual[df_actual['부서'].isin(partner_depts)]
+            partner_total = len(partner_df)
+            partner_summary = partner_df.groupby(['식사일자', '부서', '식사구분']).size().reset_index(name='인원수')
         else:
             partner_summary = pd.DataFrame(columns=['식사일자', '부서', '식사구분', '인원수'])
+
+        # ✅ 화면 UI용 요약 데이터 생성
+        summary_data = {
+            "no_show_count": len(no_show),
+            "unreg_count": len(unreg),
+            "partner_count": partner_total,
+            "start_date": start_date,
+            "end_date": end_date
+        }
 
         # 6. 결과 엑셀 파일 생성
         output = io.BytesIO()
@@ -1694,7 +1716,7 @@ def compare_auto():
             unreg.to_excel(writer, sheet_name='미신청 식사', index=False)
             partner_summary.to_excel(writer, sheet_name='협력사 식사 현황', index=False)
 
-            # 중앙 정렬 서식 적용
+            # 중앙 정렬 적용
             from openpyxl.styles import Alignment
             for sheet_name in writer.sheets:
                 ws = writer.sheets[sheet_name]
@@ -1703,9 +1725,18 @@ def compare_auto():
                         cell.alignment = Alignment(horizontal='center', vertical='center')
 
         output.seek(0)
-        return send_file(output, as_attachment=True, 
-                         download_name=f"Meal_Analysis_{start_date}_{end_date}.xlsx",
-                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        
+        # 7. 응답 전송 (파일 + 헤더에 요약 데이터 포함)
+        response = send_file(output, as_attachment=True, 
+                             download_name=f"Meal_Analysis_{start_date}_{end_date}.xlsx",
+                             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        
+        # 프론트엔드에서 읽을 수 있도록 요약 정보를 헤더에 삽입
+        response.headers['X-Analysis-Summary'] = json.dumps(summary_data)
+        # CORS 설정에서 해당 헤더를 접근 가능하게 노출
+        response.headers['Access-Control-Expose-Headers'] = 'X-Analysis-Summary'
+        
+        return response
 
     except Exception as e:
         print(f"❌ 분석 오류: {e}")
