@@ -32,7 +32,6 @@ from flask import send_from_directory
 from werkzeug.utils import secure_filename
 
 
-
 KST = timezone(timedelta(hours=9))
 def now_kst_str():
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
@@ -226,19 +225,14 @@ def allowed_menu_file(filename):
     ext = os.path.splitext(filename)[1].lower()
     return ext in MENU_ALLOWED_EXT
 
-# app.py 상단 수정
-
-# 1. Flask 앱 인스턴스를 먼저 생성
+# Flask 앱 생성
 app = Flask(__name__)
+
 app.secret_key = os.environ.get("SECRET_KEY")
 
-# 2. 생성된 app을 인자로 CORS 설정 (상세 설정 포함)
-from flask_cors import CORS
-CORS(app, resources={r"/*": {
-    "origins": ["http://127.0.0.1:5500", "https://mealfrontend.onrender.com"],
-    "expose_headers": ["X-Analysis-Summary"]  # JS가 분석 결과 헤더를 읽을 수 있도록 허용
-}})
 
+# 모든 도메인에서 CORS 허용 (프론트엔드가 localhost:3000 등에 있어도 접근 가능)
+CORS(app) #프론트와 연동
 
 
 # ✅ SQLite 데이터베이스 연결 함수
@@ -1616,42 +1610,41 @@ def get_stats_period():
 
 @app.route('/admin/stats/compare-auto', methods=['POST'])
 def compare_auto():
+    # 1. 파일 수신 확인
     if 'actual' not in request.files:
         return jsonify({"error": "실적 자료(엑셀) 파일이 필요합니다."}), 400
     
     file_actual = request.files['actual']
+    # 협력사 부서 리스트
     partner_depts = ['DEX', 'FBF-ENG', '하이테크주택', '신명전력', '주노텍']
 
     def clean_name(name):
+        """이름 전처리: 공백 제거 및 동명이인 식별자(a, 1 등) 제거"""
         if not name: return ""
         name = str(name).strip()
         name = re.sub(r'\s+', '', name)
-        # 이름 뒤 식별자 제거 (홍길동a -> 홍길동)
+        # 한글 이름(2~4자) 뒤에 붙은 영문자나 숫자 1자리 제거 (예: 홍길동a -> 홍길동)
         name = re.sub(r'([가-힣]{2,4})[a-zA-Z0-9]$', r'\1', name)
         return name
 
-    def clean_dept(dept):
-        if not dept: return ""
-        dept = str(dept).strip()
-        # 부서명 괄호 제거 (제어시스템(설계) -> 제어시스템)
-        dept = re.sub(r'\(.*?\)', '', dept)
-        return dept.strip()
-
     try:
+        # 2. 업로드된 실적 엑셀 읽기
         df_actual = pd.read_excel(file_actual, engine='openpyxl')
-        df_actual.columns = df_actual.columns.str.strip()
         
-        # '조직' 열을 '부서'로 통일
+        # 열 이름 정규화 및 '조직' -> '부서' 변경
+        df_actual.columns = df_actual.columns.str.strip()
         if '조직' in df_actual.columns:
             df_actual.rename(columns={'조직': '부서'}, inplace=True)
 
+        # 실적 데이터 이름/날짜 전처리
         df_actual['이름'] = df_actual['이름'].apply(clean_name)
-        df_actual['부서'] = df_actual['부서'].apply(clean_dept)
         df_actual['식사일자'] = pd.to_datetime(df_actual['식사일자']).dt.strftime('%Y-%m-%d')
         
+        # 분석 기간 추출
         start_date = df_actual['식사일자'].min()
         end_date = df_actual['식사일자'].max()
 
+        # 3. DB에서 신청 데이터 조회
         conn = sqlite3.connect(DATABASE)
         query = """
             SELECT m.date as 식사일자, e.name as 이름, e.dept as 부서,
@@ -1663,58 +1656,59 @@ def compare_auto():
         df_db = pd.read_sql_query(query, conn, params=(start_date, end_date))
         conn.close()
 
+        # 4. DB 데이터 변환 (DB 이름도 동일하게 정규화하여 매칭률 향상)
         applied_rows = []
         for _, row in df_db.iterrows():
-            c_name = clean_name(row['이름'])
-            c_dept = clean_dept(row['부서'])
-            if row['breakfast'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': c_name, '부서': c_dept, '식사구분': '조식'})
-            if row['lunch'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': c_name, '부서': c_dept, '식사구분': '중식'})
-            if row['dinner'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': c_name, '부서': c_dept, '식사구분': '석식'})
+            clean_db_name = clean_name(row['이름'])
+            if row['breakfast'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '조식'})
+            if row['lunch'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '중식'})
+            if row['dinner'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': clean_db_name, '부서': row['부서'], '식사구분': '석식'})
         
         df_applied = pd.DataFrame(applied_rows)
 
-        # 노쇼 및 미신청 분석
+        # 5. 데이터 대조 분석 (Merge)
+        # ① 노쇼 분석 (DB에는 있으나 실적에는 없는 경우)
         no_show = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='left', indicator=True)
         no_show = no_show[no_show['_merge'] == 'left_only'].drop(columns=['_merge'])
         if '부서_y' in no_show.columns: no_show = no_show.drop(columns=['부서_y']).rename(columns={'부서_x': '부서'})
 
+        # ② 미신청 식사 분석 (실적에는 있으나 DB에는 없는 경우)
         unreg = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='right', indicator=True)
         unreg = unreg[unreg['_merge'] == 'right_only'].drop(columns=['_merge'])
         if '부서_x' in unreg.columns: unreg = unreg.drop(columns=['부서_x']).rename(columns={'부서_y': '부서'})
+        
+        # 미신청 명단에서 협력사 제거 (일반 직원만 남김)
         if '부서' in unreg.columns:
             unreg = unreg[~unreg['부서'].isin(partner_depts)]
 
-        partner_total = len(df_actual[df_actual['부서'].isin(partner_depts)]) if '부서' in df_actual.columns else 0
+        # ③ 협력사 요약 현황
+        if '부서' in df_actual.columns:
+            partner_summary = df_actual[df_actual['부서'].isin(partner_depts)].groupby(['식사일자', '부서', '식사구분']).size().reset_index(name='인원수')
+        else:
+            partner_summary = pd.DataFrame(columns=['식사일자', '부서', '식사구분', '인원수'])
 
-        # UI용 요약 및 상세 리스트 데이터 (JSON)
-        summary_data = {
-            "no_show_count": len(no_show),
-            "unreg_count": len(unreg),
-            "partner_count": partner_total,
-            "start_date": start_date,
-            "end_date": end_date,
-            "no_show_list": no_show.to_dict(orient='records'),
-            "unreg_list": unreg.to_dict(orient='records')
-        }
-
+        # 6. 결과 엑셀 파일 생성
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             no_show.to_excel(writer, sheet_name='노쇼 명단', index=False)
             unreg.to_excel(writer, sheet_name='미신청 식사', index=False)
-            
+            partner_summary.to_excel(writer, sheet_name='협력사 식사 현황', index=False)
+
+            # 중앙 정렬 서식 적용
+            from openpyxl.styles import Alignment
+            for sheet_name in writer.sheets:
+                ws = writer.sheets[sheet_name]
+                for row in ws.iter_rows():
+                    for cell in row:
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
+
         output.seek(0)
-        
-        response = send_file(output, as_attachment=True, 
-                             download_name=f"Meal_Analysis_{start_date}.xlsx",
-                             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        
-        # 헤더에 데이터 삽입 (CORS 노출 설정 포함)
-        response.headers['X-Analysis-Summary'] = json.dumps(summary_data, ensure_ascii=False)
-        response.headers['Access-Control-Expose-Headers'] = 'X-Analysis-Summary'
-        
-        return response
+        return send_file(output, as_attachment=True, 
+                         download_name=f"Meal_Analysis_{start_date}_{end_date}.xlsx",
+                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
     except Exception as e:
+        print(f"❌ 분석 오류: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/admin/stats/period/excel", methods=["GET"])
