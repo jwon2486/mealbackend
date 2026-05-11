@@ -7,7 +7,7 @@
 import sys
 print("✅ 현재 실행 중인 Python:", sys.executable)
 
-from flask import Flask, request, jsonify, send_file, session
+from flask import Flask, request, jsonify, send_file, session, make_response
 from flask_cors import CORS
 from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
@@ -1612,10 +1612,10 @@ def get_stats_period():
 def compare_auto():
     # 1. 파일 수신 확인
     if 'actual' not in request.files:
-        return jsonify({"error": "실적 자료(엑셀) 파일이 필요합니다."}), 400
+        return jsonify({"error": "실적 자료(엑셀) 파일이 필요합니다."}),
     
     file_actual = request.files['actual']
-    # 협력사 부서 리스트
+    # 협력사 부서 리스트 (필요에 따라 수정)
     partner_depts = ['DEX', 'FBF-ENG', '하이테크주택', '신명전력', '주노텍']
 
     def clean_name(name):
@@ -1623,9 +1623,17 @@ def compare_auto():
         if not name: return ""
         name = str(name).strip()
         name = re.sub(r'\s+', '', name)
-        # 한글 이름(2~4자) 뒤에 붙은 영문자나 숫자 1자리 제거 (예: 홍길동a -> 홍길동)
+        # 한글 이름(2~4자) 뒤에 붙은 영문자나 숫자 1자리 제거
         name = re.sub(r'([가-힣]{2,4})[a-zA-Z0-9]$', r'\1', name)
         return name
+
+    def clean_dept(dept):
+        """부서명 전처리: 괄호와 그 안의 내용 제거 (예: 고객팀(유상) -> 고객팀)"""
+        if not dept: return ""
+        dept = str(dept).strip()
+        # 괄호와 괄호 안의 모든 내용을 제거하는 정규식
+        dept = re.sub(r'\(.*?\)', '', dept).strip()
+        return dept
 
     try:
         # 2. 업로드된 실적 엑셀 읽기
@@ -1636,7 +1644,8 @@ def compare_auto():
         if '조직' in df_actual.columns:
             df_actual.rename(columns={'조직': '부서'}, inplace=True)
 
-        # 실적 데이터 이름/날짜 전처리
+        # 실적 데이터 이름/날짜/부서 전처리
+        df_actual['부서'] = df_actual['부서'].apply(clean_dept) # ✅ 부서 통합 로직 적용
         df_actual['이름'] = df_actual['이름'].apply(clean_name)
         df_actual['식사일자'] = pd.to_datetime(df_actual['식사일자']).dt.strftime('%Y-%m-%d')
         
@@ -1656,7 +1665,10 @@ def compare_auto():
         df_db = pd.read_sql_query(query, conn, params=(start_date, end_date))
         conn.close()
 
-        # 4. DB 데이터 변환 (DB 이름도 동일하게 정규화하여 매칭률 향상)
+        # DB 데이터 부서 전처리
+        df_db['부서'] = df_db['부서'].apply(clean_dept) # ✅ DB 부서도 통합하여 매칭률 향상
+
+        # 4. DB 데이터 변환 (Long Format)
         applied_rows = []
         for _, row in df_db.iterrows():
             clean_db_name = clean_name(row['이름'])
@@ -1677,7 +1689,7 @@ def compare_auto():
         unreg = unreg[unreg['_merge'] == 'right_only'].drop(columns=['_merge'])
         if '부서_x' in unreg.columns: unreg = unreg.drop(columns=['부서_x']).rename(columns={'부서_y': '부서'})
         
-        # 미신청 명단에서 협력사 제거 (일반 직원만 남김)
+        # 미신청 명단에서 협력사 제거
         if '부서' in unreg.columns:
             unreg = unreg[~unreg['부서'].isin(partner_depts)]
 
@@ -1687,14 +1699,13 @@ def compare_auto():
         else:
             partner_summary = pd.DataFrame(columns=['식사일자', '부서', '식사구분', '인원수'])
 
-        # 6. 결과 엑셀 파일 생성
+        # 6. 결과 엑셀 파일 생성 (바이너리)
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             no_show.to_excel(writer, sheet_name='노쇼 명단', index=False)
             unreg.to_excel(writer, sheet_name='미신청 식사', index=False)
             partner_summary.to_excel(writer, sheet_name='협력사 식사 현황', index=False)
 
-            # 중앙 정렬 서식 적용
             from openpyxl.styles import Alignment
             for sheet_name in writer.sheets:
                 ws = writer.sheets[sheet_name]
@@ -1703,9 +1714,25 @@ def compare_auto():
                         cell.alignment = Alignment(horizontal='center', vertical='center')
 
         output.seek(0)
-        return send_file(output, as_attachment=True, 
-                         download_name=f"Meal_Analysis_{start_date}_{end_date}.xlsx",
-                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        
+        # 엑셀 바이너리 데이터를 Base64로 인코딩 (방대한 데이터 대응)
+        excel_base64 = base64.b64encode(output.getvalue()).decode('utf-8')
+
+        # 7. 최종 JSON 응답 (GUI 데이터 + 엑셀 파일 문자열)
+        return jsonify({
+            "success": True,
+            "summary": {
+                "no_show_count": len(no_show),
+                "unreg_count": len(unreg),
+                "partner_count": int(partner_summary['인원수'].sum()) if not partner_summary.empty else 0,
+                "start_date": start_date,
+                "end_date": end_date,
+                "no_show_list": no_show.to_dict(orient='records'), # 전체 명단 전송
+                "unreg_list": unreg.to_dict(orient='records')     # 전체 명단 전송
+            },
+            "excel_file": excel_base64,
+            "file_name": f"Meal_Analysis_{start_date}_{end_date}.xlsx"
+        })
 
     except Exception as e:
         print(f"❌ 분석 오류: {e}")
