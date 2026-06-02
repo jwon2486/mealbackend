@@ -243,6 +243,26 @@ def get_db_connection():
      conn.row_factory = sqlite3.Row
      return conn
 
+def init_db_deadline_extensions(cursor):
+    # 마감 설정 테이블 생성
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS deadline_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    
+    # 기존 소스코드에 하드코딩되어 있던 기본 마감 규칙 자동 등록
+    default_settings = [
+        ("breakfast_days_before", "1"), ("breakfast_time", "09:00"),  # 조식: 전날 09:00
+        ("lunch_days_before", "0"),     ("lunch_time", "10:30"),      # 중식: 당일 10:30
+        ("dinner_days_before", "0"),    ("dinner_time", "14:30"),     # 석식: 당일 14:30
+        ("next_week_day_of_week", "3"), # 차주 일괄마감 요일: 3 (수요일)
+        ("next_week_time", "16:00")     # 차주 일괄마감 시각: 16:00
+    ]
+    for key, val in default_settings:
+        cursor.execute("INSERT OR IGNORE INTO deadline_settings (key, value) VALUES (?, ?)", (key, val))
+
 # ✅ 앱 시작 시 테이블이 없으면 생성하는 초기화 함수
 def init_db():
     conn = get_db_connection()
@@ -346,19 +366,113 @@ def init_db():
     conn.commit()
     conn.close()
 
-def is_expired(meal_type, date_str):
-    from datetime import datetime
-    meal_date = datetime.strptime(date_str, "%Y-%m-%d")
-    now = datetime.now()
+# ============================================================================
+# 관리자 마감시간 설정 조회 및 저장 API 
+# ============================================================================
+@app.route("/admin/api/deadlines", methods=["GET"])
+def get_deadlines():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM deadline_settings")
+        rows = cursor.fetchall()
+        conn.close()
+        return jsonify({row["key"]: row["value"] for row in rows}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    if meal_type == '점심':
-        deadline = meal_date.replace(hour=9, minute=0)
-    elif meal_type == '저녁':
-        deadline = meal_date.replace(hour=14, minute=0)
+@app.route("/admin/api/deadlines", methods=["POST"])
+def save_deadlines():
+    data = request.get_json() or {}
+    requester_id = data.get("requester_id") # 프론트엔드가 심어서 보낸 요청자 사번
+    
+    if not requester_id:
+        print("🚨 [보안 위반 감시] 사번 정보가 누락된 익명의 마감 변경 시도가 차단되었습니다.")
+        return jsonify({"error": "인증 정보가 올바르지 않습니다."}), 401
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # 이중 권한 감시: 실제 DB에서 해당 사번의 권한 level 검증
+        cursor.execute("SELECT level, name, dept FROM employees WHERE id = ?", (requester_id,))
+        user = cursor.fetchone()
+        
+        if not user or int(user["level"]) != 3:
+            u_name = user["name"] if user else "알수없음"
+            u_dept = user["dept"] if user else "알수없음"
+            print(f"🔥 [보안 경고] 일반 유저 권한 우회/API 변조 시도 감시됨! 사번: {requester_id}, 이름: {u_name}({u_dept})")
+            return jsonify({"error": "권한이 없습니다. 최고 관리자만 접근 가능합니다."}), 403
+
+        # 검증 완료 후 설정값 일괄 업데이트 (Upsert)
+        settings = data.get("settings", {})
+        for key, value in settings.items():
+            cursor.execute("""
+                INSERT INTO deadline_settings (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, (key, str(value)))
+        conn.commit()
+        print(f"✅ [설정 변경 기록] 최고 관리자 {user['name']}({user['dept']})님이 마감 제어 규칙을 수정했습니다.")
+        return jsonify({"message": "금주 및 차주 마감 제어 규칙이 시스템에 안전하게 반영되었습니다."}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+# ============================================================================
+# [교체] 3. 백엔드 자체 동적 마감 검증 로직 연동
+# ============================================================================
+def is_meal_expired_db(meal_type, date_str):
+    """DB의 마감 설정을 실시간 조회하여 현재 시간(KST)이 마감되었는지 판정"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT key, value FROM deadline_settings")
+    settings = {row["key"]: row["value"] for row in cursor.fetchall()}
+    conn.close()
+    
+    if not settings:
+        return True # 설정이 아예 손상된 경우 방어적으로 마감 처리
+        
+    # 식사명 표준화 변환
+    m_type = meal_type.strip()
+    if m_type in ("조식", "breakfast"):
+        prefix = "breakfast"
+    elif m_type in ("중식", "lunch", "점심"):
+        prefix = "lunch"
+    elif m_type in ("석식", "dinner", "저녁"):
+        prefix = "dinner"
     else:
         return True
 
-    return now > deadline
+    days_before = int(settings.get(f"{prefix}_days_before", 0))
+    time_str = settings.get(f"{prefix}_time", "00:00")
+    
+    try:
+        hour, minute = map(int, time_str.split(":"))
+        meal_date = datetime.strptime(date_str, "%Y-%m-%d")
+        
+        # 마감 시점 계산 (식사 타겟일 - 기준일)
+        deadline = meal_date - timedelta(days=days_before)
+        deadline = deadline.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        
+        # 한국 표준시(KST) 타임존 기준으로 현재 시각과 비교 검증
+        return datetime.now(KST) > deadline
+    except Exception as e:
+        print(f"❌ 마감 계산 파싱 에러 ({meal_type}, {date_str}):", e)
+        return True    
+
+def is_expired(meal_type, date_str):
+    return is_meal_expired_db(meal_type, date_str)
+    #from datetime import datetime
+    #meal_date = datetime.strptime(date_str, "%Y-%m-%d")
+    #now = datetime.now()
+
+    #if meal_type == '점심':
+        #deadline = meal_date.replace(hour=9, minute=0)
+    #elif meal_type == '저녁':
+        #deadline = meal_date.replace(hour=14, minute=0)
+    #else:
+        #return True
+
+    #return now > deadline
 
 def is_this_week(date_str):
     try:
