@@ -244,7 +244,7 @@ def get_db_connection():
      return conn
 
 def init_db_deadline_extensions(cursor):
-    # 마감 설정 테이블 생성
+    ## 마감 설정 테이블 생성
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS deadline_settings (
             key TEXT PRIMARY KEY,
