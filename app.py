@@ -395,8 +395,8 @@ def is_meal_expired_db(meal_type, date_str):
         hour, minute = map(int, time_str.split(":"))
         meal_date = datetime.strptime(date_str, "%Y-%m-%d")
         deadline = meal_date - timedelta(days=days_before)
-        deadline = deadline.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        return datetime.now(KST) > deadline
+        deadline = deadline.replace(hour=hour, minute=minute, second=0, microsecond=0, tzinfo=KST)
+        return datetime.now(KST) > deadline 
     except Exception as e:
         print(f"❌ 마감 계산 파싱 에러 ({meal_type}, {date_str}):", e)
         return True    
