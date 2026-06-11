@@ -90,7 +90,6 @@ def upload_file_to_github(file_path):
     if get_resp.status_code == 200:
         sha = get_resp.json().get("sha")
 
-    now_kst_iso = datetime.now(KST).isoformat()
     now_kst_string = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
 
     payload = {
@@ -118,9 +117,6 @@ def backup_db_to_github():
         upload_file_to_github(snapshot)
 
 def backup_worker_midnight():
-    """
-    매일 08시를 기점으로 3시간 간격마다 정해진 시각에 DB 백업을 실행하는 워커
-    """
     while True:
         now_kst = datetime.now(KST)
         target_hours = [2, 5, 8, 11, 14, 17, 20, 23]
@@ -185,11 +181,12 @@ CORS(app)
 
 def get_db_connection():
      conn = sqlite3.connect("db.sqlite")
+     # 💡 연동 안정성을 위해 접속할 때마다 외래키 활성화 PRAGMA 자동 실행
+     conn.execute("PRAGMA foreign_keys = ON;")
      conn.row_factory = sqlite3.Row
      return conn
 
 def init_db_deadline_extensions(cursor):
-    """마감시간 제어를 위한 설정 테이블 생성 및 초기화 데이터 적재"""
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS deadline_settings (
             key TEXT PRIMARY KEY,
@@ -211,6 +208,31 @@ def init_db():
     cursor = conn.cursor()
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS department_tree (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dept_name TEXT NOT NULL,            
+            parent_id INTEGER DEFAULT NULL,     
+            UNIQUE(dept_name, parent_id),       
+            FOREIGN KEY (parent_id) REFERENCES department_tree(id) ON DELETE RESTRICT
+        )
+    """)
+
+    # 💡 [구조 변경]: 구버전 dept TEXT 구조를 신버전 부서 트리 연동 규격(dept INTEGER)으로 완벽 패치
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS employees (
+            id TEXT PRIMARY KEY,       
+            name TEXT NOT NULL,        
+            type TEXT DEFAULT '직영',    
+            dept INTEGER NOT NULL,         
+            rank TEXT DEFAULT '',      
+            region TEXT DEFAULT '',      
+            level INTEGER DEFAULT 1,      
+            password TEXT DEFAULT '',
+            FOREIGN KEY (dept) REFERENCES department_tree(id) ON DELETE RESTRICT
+        )
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS holidays (
             id INTEGER PRIMARY KEY AUTOINCREMENT,  
             date TEXT NOT NULL UNIQUE,             
@@ -229,19 +251,6 @@ def init_db():
             created_at TEXT,
             FOREIGN KEY (user_id) REFERENCES employees(id), 
             UNIQUE(user_id, date)                  
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS employees (
-            id TEXT PRIMARY KEY,       
-            name TEXT NOT NULL,        
-            type TEXT DEFAULT '직영',    
-            dept TEXT NOT NULL,         
-            rank TEXT DEFAULT '',      
-            region TEXT DEFAULT '',      
-            level INTEGER DEFAULT 1,      
-            password TEXT DEFAULT ''  
         )
     """)
 
@@ -301,7 +310,6 @@ def init_db():
     )
     """)
 
-    # 💡 마감 제어 누락 익스텐션 테이블 생성 연동
     init_db_deadline_extensions(cursor)
 
     conn.commit()
@@ -312,7 +320,6 @@ def init_db():
 # ============================================================================
 @app.route("/api/server-time", methods=["GET"])
 def get_server_time():
-    """백엔드 서버가 구동 중인 환경의 정확한 한국 표준시(KST)를 반환"""
     return jsonify({
         "server_time": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
         "server_date": datetime.now(KST).strftime("%Y-%m-%d")
@@ -339,19 +346,21 @@ def save_deadlines():
     requester_id = data.get("requester_id") 
     
     if not requester_id:
-        print("🚨 [보안 위반 감시] 사번 정보가 누락된 익명의 마감 변경 시도가 차단되었습니다.")
         return jsonify({"error": "인증 정보가 올바르지 않습니다."}), 401
 
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT level, name, dept FROM employees WHERE id = ?", (requester_id,))
+        # 💡 [버그 조치]: e.dept 이름 매핑을 위해 department_tree 테이블 JOIN 반영
+        cursor.execute("""
+            SELECT e.level, e.name, d.dept_name AS dept 
+            FROM employees e 
+            JOIN department_tree d ON e.dept = d.id 
+            WHERE e.id = ?
+        """, (requester_id,))
         user = cursor.fetchone()
         
         if not user or int(user["level"]) != 3:
-            u_name = user["name"] if user else "알수없음"
-            u_dept = user["dept"] if user else "알수없음"
-            print(f"🔥 [보안 경고] 일반 유저 권한 우회/API 변조 시도 감시됨! 사번: {requester_id}, 이름: {u_name}({u_dept})")
             return jsonify({"error": "권한이 없습니다. 최고 관리자만 접근 가능합니다."}), 403
 
         settings = data.get("settings", {})
@@ -361,7 +370,6 @@ def save_deadlines():
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
             """, (key, str(value)))
         conn.commit()
-        print(f"✅ [설정 변경 기록] 최고 관리자 {user['name']}({user['dept']})님이 마감 제어 규칙을 수정했습니다.")
         return jsonify({"message": "금주 및 차주 마감 제어 규칙이 시스템에 안전하게 반영되었습니다."}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -398,21 +406,10 @@ def is_meal_expired_db(meal_type, date_str):
         deadline = deadline.replace(hour=hour, minute=minute, second=0, microsecond=0, tzinfo=KST)
         return datetime.now(KST) > deadline 
     except Exception as e:
-        print(f"❌ 마감 계산 파싱 에러 ({meal_type}, {date_str}):", e)
         return True    
 
 def is_expired(meal_type, date_str):
     return is_meal_expired_db(meal_type, date_str)
-
-def is_this_week(date_str):
-    try:
-        target = datetime.strptime(date_str, "%Y-%m-%d").date()
-        today = datetime.now(KST).date()
-        monday = today - timedelta(days=today.weekday())  
-        friday = monday + timedelta(days=4)               
-        return monday <= target <= friday
-    except:
-        return False
 
 # ============================================================================
 # 7. 식단표 게시판 & DB 백업 유틸 API 엔드포인트
@@ -491,7 +488,6 @@ def upload_menu_board():
             }
         }), 201
     except Exception as e:
-        print("❌ 식단표 업로드 실패:", e)
         return jsonify({"error": "업로드 실패"}), 500
 
 @app.route("/api/menu-board/delete", methods=["POST"])
@@ -524,7 +520,6 @@ def delete_menu_board():
             return jsonify({"error": "삭제 후 목록 저장 실패"}), 500
         return jsonify({"message": f"{deleted_count}건 삭제 완료"}), 200
     except Exception as e:
-        print("❌ 식단표 삭제 실패:", e)
         return jsonify({"error": "삭제 실패"}), 500
 
 # ============================================================================
@@ -740,7 +735,6 @@ def save_meals():
         conn.close()
         return jsonify({"message": "식수 저장 완료"}), 201
     except Exception as e:
-        print("❌ 식수 저장 실패:", e)
         return jsonify({"error": str(e)}), 500
     
 @app.route('/admin/selfcheck', methods=['GET'])
@@ -861,11 +855,13 @@ def get_user_meals():
         return jsonify({"error": "user_id, start, end는 필수입니다."}), 400
 
     conn = get_db_connection()
+    # 💡 [버그 조치]: e.dept 이름 매핑을 위해 department_tree 테이블 JOIN 반영
     cursor = conn.execute("""
         SELECT m.date, m.breakfast, m.lunch, m.dinner, m.created_at,   
-               e.name, e.dept, e.rank
+               e.name, d.dept_name AS dept, e.rank
         FROM meals m
         JOIN employees e ON m.user_id = e.id
+        JOIN department_tree d ON e.dept = d.id
         WHERE m.user_id = ? AND m.date BETWEEN ? AND ?
     """, (user_id, start_date, end_date))
     rows = cursor.fetchall()
@@ -899,22 +895,25 @@ def admin_get_meals():
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
+        # 💡 [버그 조치]: d.dept_name 확보를 위해 department_tree JOIN 전개
         if mode == "all":
             cursor.execute("""
-                SELECT e.id AS user_id, e.name, e.dept, e.region, m.date,
+                SELECT e.id AS user_id, e.name, d.dept_name AS dept, e.region, m.date,
                     IFNULL(m.breakfast, 0) AS breakfast, IFNULL(m.lunch, 0) AS lunch, IFNULL(m.dinner, 0) AS dinner
                 FROM employees e
+                JOIN department_tree d ON e.dept = d.id
                 LEFT JOIN meals m ON e.id = m.user_id AND m.date BETWEEN ? AND ?
                 WHERE e.type = '직영'
-                ORDER BY e.dept ASC, e.name ASC, m.date ASC
+                ORDER BY d.dept_name ASC, e.name ASC, m.date ASC
             """, (start, end))
         else:
             cursor.execute("""
-                SELECT m.user_id, e.name, e.dept, e.region, m.date, m.breakfast, m.lunch, m.dinner
+                SELECT m.user_id, e.name, d.dept_name AS dept, e.region, m.date, m.breakfast, m.lunch, m.dinner
                 FROM meals m
                 JOIN employees e ON m.user_id = e.id
+                JOIN department_tree d ON e.dept = d.id
                 WHERE m.date BETWEEN ? AND ? AND e.type = '직영'
-                ORDER BY e.dept ASC, e.name ASC, m.date ASC
+                ORDER BY d.dept_name ASC, e.name ASC, m.date ASC
             """, (start, end))
 
         rows = cursor.fetchall()
@@ -974,10 +973,17 @@ def admin_edit_meals():
 def get_employees():
     name = request.args.get("name", "").strip()
     conn = get_db_connection()
+    # 💡 [버그 조치]: 프론트 관리자 페이지 표현을 위해 문자열 부서명(d.dept_name AS dept) 변환 결합
+    query = """
+        SELECT e.id, e.name, d.dept_name AS dept, e.rank, e.type, e.region, e.level, e.password 
+        FROM employees e
+        JOIN department_tree d ON e.dept = d.id
+    """
     if name:
-        cursor = conn.execute("SELECT * FROM employees WHERE name = ?", (name,))
+        query += " WHERE e.name = ?"
+        cursor = conn.execute(query, (name,))
     else:
-        cursor = conn.execute("SELECT * FROM employees")
+        cursor = conn.execute(query)
     employees = cursor.fetchall()
     conn.close()
     return jsonify([dict(emp) for emp in employees])
@@ -987,7 +993,7 @@ def add_employee():
     data = request.get_json()
     emp_id = data.get("id")
     name = data.get("name")
-    dept = data.get("dept")
+    dept = data.get("dept") # 프론트엔드가 보낸 부서 트리 ID 번호
     rank = data.get("rank", "")
     emp_type = data.get("type", "직영")  
     emp_region = data.get("region", "에코센터")  
@@ -1012,7 +1018,7 @@ def add_employee():
 def update_employee(emp_id):
     data = request.get_json()
     name = data.get("name")
-    dept = data.get("dept")
+    dept = data.get("dept") # 부서 트리 ID 번호
     rank = data.get("rank", "")
     emp_type = data.get("type", "직영")  
     emp_region = data.get("region", "에코센터")  
@@ -1058,7 +1064,12 @@ def upload_employees():
                 ON CONFLICT(id) DO UPDATE SET name=excluded.name, dept=excluded.dept, type=excluded.type, region=excluded.region, rank=excluded.rank
             """, (row["id"], row["name"], row["dept"], row["rank"] if "rank" in row else "", row["type"], row["region"]))
         conn.commit()
-        cursor = conn.execute("SELECT * FROM employees")
+        
+        cursor = conn.execute("""
+            SELECT e.id, e.name, d.dept_name AS dept, e.rank, e.type, e.region, e.level, e.password 
+            FROM employees e
+            JOIN department_tree d ON e.dept = d.id
+        """)
         employees = [dict(emp) for emp in cursor.fetchall()]
         conn.close()
         return jsonify(employees), 200
@@ -1070,7 +1081,7 @@ def download_employee_template():
     filename = "employee_template.xlsx"
     filepath = os.path.join(os.getcwd(), filename)
     if os.path.exists(filepath): os.remove(filepath)
-    df = pd.DataFrame(columns=["사번", "이름", "부서", "직영/협력사/방문자" , "에코센터/테크센터/기타","직급(옵션)"])
+    df = pd.DataFrame(columns=["사번", "이름", "부서(트리ID)", "직영/협력사/방문자" , "에코센터/테크센터/기타","직급(옵션)"])
     df.to_excel(filepath, index=False)
     return send_file(filepath, as_attachment=True)
 
@@ -1082,7 +1093,13 @@ def login_check():
         return jsonify({"error": "사번과 이름을 모두 입력하세요"}), 400
 
     conn = get_db_connection()
-    cursor = conn.execute("SELECT id, name, dept, rank, type, level, region FROM employees WHERE id = ? AND name = ?", (emp_id, name))
+    # 💡 [버그 조치]: 프론트 스크립트 환영 안내 문자열 연동을 위해 d.dept_name 확보 결합
+    cursor = conn.execute("""
+        SELECT e.id, e.name, d.dept_name AS dept, e.rank, e.type, e.level, e.region 
+        FROM employees e 
+        JOIN department_tree d ON e.dept = d.id
+        WHERE e.id = ? AND e.name = ?
+    """, (emp_id, name))
     user = cursor.fetchone()
     conn.close()
 
@@ -1100,11 +1117,14 @@ def get_change_logs():
 
     conn = get_db_connection()
     try:
+        # 💡 [버그 조치]: 로그 출력 단면 조회를 위해 d.dept_name JOIN 전개
         cursor = conn.execute("""
-            SELECT l.date, e.dept, e.name, l.meal_type, l.before_status, l.after_status, l.changed_at
-            FROM meal_logs l JOIN employees e ON l.emp_id = e.id
-            WHERE l.date BETWEEN ? AND ? AND e.name LIKE ? AND e.dept LIKE ?
-            ORDER BY l.date ASC, CASE l.meal_type WHEN 'breakfast' THEN 1 WHEN 'lunch' THEN 2 WHEN 'dinner' THEN 3 ELSE 4 END, e.dept ASC, e.name ASC, l.changed_at DESC
+            SELECT l.date, d.dept_name AS dept, e.name, l.meal_type, l.before_status, l.after_status, l.changed_at
+            FROM meal_logs l 
+            JOIN employees e ON l.emp_id = e.id
+            JOIN department_tree d ON e.dept = d.id
+            WHERE l.date BETWEEN ? AND ? AND e.name LIKE ? AND d.dept_name LIKE ?
+            ORDER BY l.date ASC, CASE l.meal_type WHEN 'breakfast' THEN 1 WHEN 'lunch' THEN 2 WHEN 'dinner' THEN 3 ELSE 4 END, d.dept_name ASC, e.name ASC, l.changed_at DESC
         """, (start, end, f"%{name}%", f"%{dept}%"))
         return jsonify([dict(row) for row in cursor.fetchall()]), 200
     except Exception as e:
@@ -1122,20 +1142,22 @@ def download_logs_excel():
     conn = get_db_connection()
     try:
         cursor = conn.execute("""
-            SELECT l.date, e.dept, e.name, l.meal_type, l.before_status, l.after_status, l.changed_at
-            FROM meal_logs l JOIN employees e ON l.emp_id = e.id
-            WHERE l.date BETWEEN ? AND ? AND e.name LIKE ? AND e.dept LIKE ?
+            SELECT l.date, d.dept_name AS dept, e.name, l.meal_type, l.before_status, l.after_status, l.changed_at
+            FROM meal_logs l 
+            JOIN employees e ON l.emp_id = e.id
+            JOIN department_tree d ON e.dept = d.id
+            WHERE l.date BETWEEN ? AND ? AND e.name LIKE ? AND d.dept_name LIKE ?
         """, (start, end, f"%{name}%", f"%{dept}%"))
         
         logs = [dict(row) for row in cursor.fetchall()]
         if not logs: return "데이터 없음", 404
         df = pd.DataFrame(logs)
-        df["식수일"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+        df["식사일"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
         df["식사유형"] = df["meal_type"].map({"breakfast": "아침", "lunch": "점심", "dinner": "저녁"})
         df["변경전"] = df["before_status"].map({0: "미신청", 1: "신청"})
         df["변경후"] = df["after_status"].map({0: "미신청", 1: "신청"})
         
-        final_df = df[["식수일", "식사유형", "dept", "name", "변경전", "변경후", "changed_at"]].rename(columns={"dept":"부서","name":"이름","changed_at":"변경시간"})
+        final_df = df[["식사일", "식사유형", "dept", "name", "변경전", "변경후", "changed_at"]].rename(columns={"dept":"부서","name":"이름","changed_at":"변경시간"})
         output = BytesIO()
         final_df.to_excel(output, index=False)
         output.seek(0)
@@ -1156,13 +1178,16 @@ def get_visitor_logs():
     try:
         conn = get_db_connection()
         query = """
-            SELECT l.date, e.dept, l.applicant_name, l.before_breakfast, l.before_lunch, l.before_dinner, l.breakfast, l.lunch, l.dinner, l.updated_at
-            FROM visitor_logs l LEFT JOIN employees e ON l.applicant_id = e.id WHERE 1 = 1
+            SELECT l.date, d.dept_name AS dept, l.applicant_name, l.before_breakfast, l.before_lunch, l.before_dinner, l.breakfast, l.lunch, l.dinner, l.updated_at
+            FROM visitor_logs l 
+            LEFT JOIN employees e ON l.applicant_id = e.id 
+            LEFT JOIN department_tree d ON e.dept = d.id
+            WHERE 1 = 1
         """
         params = []
         if start and end: query += " AND l.date BETWEEN ? AND ?"; params.extend([start, end])
         if name: query += " AND l.applicant_name LIKE ?"; params.append(f"%{name}%")
-        if dept: query += " AND IFNULL(e.dept, '') LIKE ?"; params.append(f"%{dept}%")
+        if dept: query += " AND IFNULL(d.dept_name, '') LIKE ?"; params.append(f"%{dept}%")
         if vtype: query += " AND l.type = ?"; params.append(vtype)
 
         query += " ORDER BY l.date ASC, l.updated_at DESC"
@@ -1181,8 +1206,11 @@ def download_visitor_logs_excel():
     conn = get_db_connection()
     try:
         query = """
-            SELECT l.date, e.dept, l.applicant_name, l.before_breakfast, l.before_lunch, l.before_dinner, l.breakfast, l.lunch, l.dinner, l.updated_at
-            FROM visitor_logs l LEFT JOIN employees e ON l.applicant_id = e.id WHERE l.date BETWEEN ? AND ?
+            SELECT l.date, d.dept_name AS dept, l.applicant_name, l.before_breakfast, l.before_lunch, l.before_dinner, l.breakfast, l.lunch, l.dinner, l.updated_at
+            FROM visitor_logs l 
+            LEFT JOIN employees e ON l.applicant_id = e.id 
+            LEFT JOIN department_tree d ON e.dept = d.id
+            WHERE l.date BETWEEN ? AND ?
         """
         params = [start, end]
         cursor = conn.execute(query, params)
@@ -1241,7 +1269,14 @@ def compare_auto():
         start_date, end_date = df_actual['식사일자'].min(), df_actual['식사일자'].max()
 
         conn = sqlite3.connect(DATABASE)
-        df_db = pd.read_sql_query("SELECT m.date as 식사일자, e.name as 이름, e.dept as 부서, m.breakfast, m.lunch, m.dinner FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", conn, params=(start_date, end_date))
+        # 💡 [버그 조치]: e.dept 숫자를 명칭 문자열로 변환하여 엑셀과 비교 가공하기 위해 d.dept_name JOIN 처리
+        df_db = pd.read_sql_query("""
+            SELECT m.date as 식사일자, e.name as 이름, d.dept_name as 부서, m.breakfast, m.lunch, m.dinner 
+            FROM meals m 
+            JOIN employees e ON m.user_id = e.id 
+            JOIN department_tree d ON e.dept = d.id
+            WHERE m.date BETWEEN ? AND ?
+        """, conn, params=(start_date, end_date))
         conn.close()
 
         df_db['부서'] = df_db['부서'].apply(clean_dept)
@@ -1302,8 +1337,22 @@ def graph_week_trend():
 def get_dept_summary():
     start, end = request.args.get("start"), request.args.get("end")
     conn = get_db_connection()
-    m_rows = conn.execute("SELECT e.dept, e.type, m.breakfast, m.lunch, m.dinner FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", (start, end)).fetchall()
-    v_rows = conn.execute("SELECT e.dept, v.type, v.breakfast, v.lunch, v.dinner FROM visitors v JOIN employees e ON v.applicant_id = e.id WHERE v.date BETWEEN ? AND ?", (start, end)).fetchall()
+    # 💡 [버그 조치]: e.dept 데이터 매핑을 위해 department_tree 테이블 JOIN
+    m_rows = conn.execute("""
+        SELECT d.dept_name AS dept, e.type, m.breakfast, m.lunch, m.dinner 
+        FROM meals m 
+        JOIN employees e ON m.user_id = e.id 
+        JOIN department_tree d ON e.dept = d.id
+        WHERE m.date BETWEEN ? AND ?
+    """, (start, end)).fetchall()
+    
+    v_rows = conn.execute("""
+        SELECT d.dept_name AS dept, v.type, v.breakfast, v.lunch, v.dinner 
+        FROM visitors v 
+        JOIN employees e ON v.applicant_id = e.id 
+        JOIN department_tree d ON e.dept = d.id
+        WHERE v.date BETWEEN ? AND ?
+    """, (start, end)).fetchall()
     conn.close()
 
     summary = defaultdict(lambda: {"breakfast": 0, "lunch": 0, "dinner": 0})
@@ -1320,8 +1369,22 @@ def get_dept_summary():
 def download_dept_summary_excel():
     start, end = request.args.get("start"), request.args.get("end")
     conn = get_db_connection()
-    m_rows = conn.execute("SELECT e.dept, e.type, m.breakfast, m.lunch, m.dinner FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", (start, end)).fetchall()
-    v_rows = conn.execute("SELECT e.dept, v.type, v.breakfast, v.lunch, v.dinner FROM visitors v JOIN employees e ON v.applicant_id = e.id WHERE v.date BETWEEN ? AND ?", (start, end)).fetchall()
+    # 💡 [버그 조치]: d.dept_name 확보를 위해 department_tree 테이블 JOIN
+    m_rows = conn.execute("""
+        SELECT d.dept_name AS dept, e.type, m.breakfast, m.lunch, m.dinner 
+        FROM meals m 
+        JOIN employees e ON m.user_id = e.id 
+        JOIN department_tree d ON e.dept = d.id
+        WHERE m.date BETWEEN ? AND ?
+    """, (start, end)).fetchall()
+    
+    v_rows = conn.execute("""
+        SELECT d.dept_name AS dept, v.type, v.breakfast, v.lunch, v.dinner 
+        FROM visitors v 
+        JOIN employees e ON v.applicant_id = e.id 
+        JOIN department_tree d ON e.dept = d.id
+        WHERE v.date BETWEEN ? AND ?
+    """, (start, end)).fetchall()
     conn.close()
 
     summary = defaultdict(lambda: {"breakfast": 0, "lunch": 0, "dinner": 0})
@@ -1342,7 +1405,12 @@ def download_dept_summary_excel():
 def weekly_dept_stats():
     start, end = request.args.get("start"), request.args.get("end")
     conn = get_db_connection()
-    employees = conn.execute("SELECT id, name, dept, type, region FROM employees").fetchall()
+    # 💡 [버그 조치]: 하드코딩된 부서 텍스트 가공 로직 복구를 위해 d.dept_name JOIN 결합
+    employees = conn.execute("""
+        SELECT e.id, e.name, d.dept_name AS dept, e.type, e.region 
+        FROM employees e
+        JOIN department_tree d ON e.dept = d.id
+    """).fetchall()
     dept_members = defaultdict(list)
     for e in employees: dept_members[(e["dept"], e["type"], e["region"])].append(e["id"])
 
@@ -1351,7 +1419,15 @@ def weekly_dept_stats():
         if type_ == "직영" and region != "에코센터": continue
         dept_map[dept] = {"type": type_, "dept": dept, "display_dept": dept, "total": len(ids), "days": {}}
     
-    meal_rows = conn.execute("SELECT m.date, e.name, e.dept, e.type, e.region, m.breakfast, m.lunch, m.dinner FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", (start, end)).fetchall()
+    # 💡 [버그 조치]: 데이터 집계를 위해 department_tree JOIN 전개
+    meal_rows = conn.execute("""
+        SELECT m.date, e.name, d.dept_name AS dept, e.type, e.region, m.breakfast, m.lunch, m.dinner 
+        FROM meals m 
+        JOIN employees e ON m.user_id = e.id 
+        JOIN department_tree d ON e.dept = d.id
+        WHERE m.date BETWEEN ? AND ?
+    """, (start, end)).fetchall()
+    
     for row in meal_rows:
         date, name, dept, type_, region = row["date"], row["name"], row["dept"], row["type"], row["region"]
         dept_key = f"{dept[:4]}(출장)" if type_ == "직영" and region != "에코센터" else dept
@@ -1362,7 +1438,15 @@ def weekly_dept_stats():
             if row[meal] > 0:
                 dept_map[dept_key]["days"].setdefault(date, {"b":[], "l":[], "d":[]})[key].append(name)
 
-    visitor_rows = conn.execute("SELECT v.date, v.breakfast, v.lunch, v.dinner, e.name, e.dept, v.type FROM visitors v JOIN employees e ON v.applicant_id = e.id WHERE v.date BETWEEN ? AND ?", (start, end)).fetchall()
+    # 💡 [버그 조치]: 방문자 부서 통계를 위해 department_tree JOIN
+    visitor_rows = conn.execute("""
+        SELECT v.date, v.breakfast, v.lunch, v.dinner, e.name, d.dept_name AS dept, v.type 
+        FROM visitors v 
+        JOIN employees e ON v.applicant_id = e.id 
+        JOIN department_tree d ON e.dept = d.id
+        WHERE v.date BETWEEN ? AND ?
+    """, (start, end)).fetchall()
+    
     for row in visitor_rows:
         date, name, dept, vtype = row["date"], row["name"], row["dept"], row["type"]
         dept_key = f"{dept[:2]}(방문자)" if vtype == "방문자" else dept
@@ -1380,7 +1464,14 @@ def weekly_dept_stats():
 def weekly_dept_excel():
     start, end = request.args.get("start"), request.args.get("end")
     conn = get_db_connection()
-    rows = conn.execute("SELECT m.date, m.breakfast, m.lunch, m.dinner, e.name, e.dept, e.type FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", (start, end)).fetchall()
+    # 💡 [버그 조치]: 엑셀 다운로드 파일 내 부서 텍스트 가독성을 위해 d.dept_name 매핑 처리
+    rows = conn.execute("""
+        SELECT m.date, m.breakfast, m.lunch, m.dinner, e.name, d.dept_name AS dept, e.type 
+        FROM meals m 
+        JOIN employees e ON m.user_id = e.id 
+        JOIN department_tree d ON e.dept = d.id
+        WHERE m.date BETWEEN ? AND ?
+    """, (start, end)).fetchall()
     conn.close()
     
     df = pd.DataFrame([dict(r) for r in rows])
@@ -1393,8 +1484,14 @@ def weekly_dept_excel():
 def download_pivot_excel():
     start, end = request.args.get("start"), request.args.get("end")
     conn = sqlite3.connect("db.sqlite")
-    df_meals = pd.read_sql_query("SELECT m.date, m.breakfast, m.lunch, m.dinner, e.name, e.dept, e.type, e.region FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", conn, params=(start, end))
-    df_visitors = pd.read_sql_query("SELECT v.applicant_name, v.date, v.breakfast, v.lunch, v.dinner, v.type, e.dept, e.type as emp_type FROM visitors v LEFT JOIN employees e ON v.applicant_id = e.id WHERE v.date BETWEEN ? AND ?", conn, params=(start, end))
+    # 💡 [버그 조치]: 피벗 엑셀 시트 출력 구성을 위해 d.dept_name 매핑 처리
+    df_meals = pd.read_sql_query("""
+        SELECT m.date, m.breakfast, m.lunch, m.dinner, e.name, d.dept_name as dept, e.type, e.region 
+        FROM meals m 
+        JOIN employees e ON m.user_id = e.id 
+        JOIN department_tree d ON e.dept = d.id
+        WHERE m.date BETWEEN ? AND ?
+    """, conn, params=(start, end))
     conn.close()
 
     eco_center, tech_center = [], []
@@ -1478,7 +1575,14 @@ def delete_visitor_entry(vid):
 def get_weekly_visitors():
     start, end = request.args.get("start"), request.args.get("end")
     conn = get_db_connection()
-    rows = conn.execute("SELECT v.*, e.name AS applicant_name, e.dept, e.type FROM visitors v LEFT JOIN employees e ON v.applicant_id = e.id WHERE v.date BETWEEN ? AND ?", (start, end)).fetchall()
+    # 💡 [버그 조치]: 부서 분석 가시성을 위해 d.dept_name JOIN 동기화
+    rows = conn.execute("""
+        SELECT v.*, e.name AS applicant_name, d.dept_name AS dept, e.type 
+        FROM visitors v 
+        LEFT JOIN employees e ON v.applicant_id = e.id 
+        LEFT JOIN department_tree d ON e.dept = d.id
+        WHERE v.date BETWEEN ? AND ?
+    """, (start, end)).fetchall()
     conn.close()
     return jsonify([dict(row) for row in rows])
 
@@ -1548,8 +1652,6 @@ def start_backup_thread():
 
 if __name__ == "__main__":
     init_db()               
-    
-    # 💡 [핵심 버그 수정]: 무한 루프가 포함된 백업 스레드를 Flask 서버 가동 직전에 '독립 스레드'로 트리거합니다.
     start_backup_thread()   
     
     port = int(os.environ.get("PORT", 5000)) 
