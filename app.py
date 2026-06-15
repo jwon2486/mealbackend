@@ -1222,57 +1222,129 @@ def get_stats_period():
 
 @app.route('/admin/stats/compare-auto', methods=['POST'])
 def compare_auto():
-    if 'actual' not in request.files: return jsonify({"error": "실적자료 누락"}), 400
-    file_actual = request.files['actual']
-    partner_depts = ['DEX', 'FBF-ENG', '하이테크주택', '신명전력', '주노텍']
-
-    clean_name = lambda n: re.sub(r'\s+', '', re.sub(r'([가-힣]{2,4})[a-zA-Z0-9]$', r'\1', str(n).strip())) if n else ""
-    clean_dept = lambda d: re.sub(r'\(.*?\)', '', str(d).strip()).strip() if d else ""
+    saved_user = session.get("currentUser")
+    if not saved_user:
+        return jsonify({"error": "로그인이 필요합니다."}), 401
+    
+    if 'actual' not in request.files:
+        return jsonify({"error": "실적 파일이 없습니다."}), 400
+        
+    file = request.files['actual']
+    if file.filename == '':
+        return jsonify({"error": "선택된 파일이 없습니다."}), 400
 
     try:
-        df_actual = pd.read_excel(file_actual, engine='openpyxl')
-        df_actual.columns = df_actual.columns.str.strip()
-        if '조직' in df_actual.columns: df_actual.rename(columns={'조직': '부서'}, inplace=True)
-
+        # 1. 실적 엑셀 데이터 로드 및 정제
+        df_actual_raw = pd.read_excel(file)
+        
+        required_actual_cols = ['식사일자', '성명', '부서', '식사구분']
+        for col in required_actual_cols:
+            if col not in df_actual_raw.columns:
+                return jsonify({"error": f"실적 파일에 '{col}' 열이 누락되었습니다."}), 400
+                
+        df_actual = df_actual_raw[required_actual_cols].copy()
+        
+        clean_name = lambda n: re.sub(r'\s+', '', re.sub(r'([가-힣]{2,4})[a-zA-Z0-9]$', r'\1', str(n).strip())) if n else ""
+        clean_dept = lambda d: re.sub(r'\(.*?\)', '', str(d).strip()).strip() if d else ""
+        
+        df_actual['이름'] = df_actual['성명'].apply(clean_name)
         df_actual['부서'] = df_actual['부서'].apply(clean_dept)
-        df_actual['이름'] = df_actual['이름'].apply(clean_name)
         df_actual['식사일자'] = pd.to_datetime(df_actual['식사일자']).dt.strftime('%Y-%m-%d')
+        df_actual['식사구분'] = df_actual['식사구분'].str.strip()
         
-        start_date, end_date = df_actual['식사일자'].min(), df_actual['식사일자'].max()
-
+        # 2. DB 신청 데이터 로드 및 정제
+        dates = df_actual['식사일자'].unique().tolist()
+        if not dates:
+            return jsonify({"error": "실적 파일에 유효한 식사일자가 없습니다."}), 400
+            
+        placeholders = ','.join(['?'] * len(dates))
+        query = f"""
+            SELECT date AS 식사일자, applicant_name AS 이름, breakfast, lunch, dinner 
+            FROM meals 
+            WHERE date IN ({placeholders})
+        """
+        
         conn = sqlite3.connect(DATABASE)
-        df_db = pd.read_sql_query("SELECT m.date as 식사일자, e.name as 이름, e.dept as 부서, m.breakfast, m.lunch, m.dinner FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", conn, params=(start_date, end_date))
+        df_meals = pd.read_sql_query(query, conn, params=dates)
         conn.close()
-
-        df_db['부서'] = df_db['부서'].apply(clean_dept)
-        applied_rows = []
-        for _, row in df_db.iterrows():
-            c_name = clean_name(row['이름'])
-            if row['breakfast'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': c_name, '부서': row['부서'], '식사구분': '조식'})
-            if row['lunch'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': c_name, '부서': row['부서'], '식사구분': '중식'})
-            if row['dinner'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': c_name, '부서': row['부서'], '식사구분': '석식'})
         
-        df_applied = pd.DataFrame(applied_rows)
+        applied_list = []
+        for _, row in df_meals.iterrows():
+            m_date = row['식사일자']
+            m_name = clean_name(row['이름'])
+            
+            # DB 사원 테이블 구조 상 부서 조회를 위해 매칭용 빈 데이터 구성 대비 사원정보 캐싱 활용 가능
+            # 기존 원본 로직의 일관성을 위해 뼈대 유지하며 '부서' 컬럼 생성
+            if row['breakfast'] == 1:
+                applied_list.append({'식사일자': m_date, '이름': m_name, '식사구분': '조식'})
+            if row['lunch'] == 1:
+                applied_list.append({'식사일자': m_date, '이름': m_name, '식사구분': '중식'})
+            if row['dinner'] == 1:
+                applied_list.append({'식사일자': m_date, '이름': m_name, '식사구분': '석식'})
+                
+        if applied_list:
+            df_applied_base = pd.DataFrame(applied_list)
+            # 신청자의 원래 부서를 보완하기 위해 사원 테이블 정보 연동 (기존 로직 보강)
+            conn = sqlite3.connect(DATABASE)
+            df_emp_dept = pd.read_sql_query("SELECT name AS 이름, department AS 부서 FROM employees", conn)
+            conn.close()
+            df_emp_dept['이름'] = df_emp_dept['이름'].apply(clean_name)
+            df_emp_dept['부서'] = df_emp_dept['부서'].apply(clean_dept)
+            df_emp_dept = df_emp_dept.drop_duplicates(subset=['이름'])
+            
+            df_applied = pd.merge(df_applied_base, df_emp_dept, on='이름', how='left')
+            df_applied['부서'] = df_applied['부서'].fillna('미지정')
+        else:
+            df_applied = pd.DataFrame(columns=['식사일자', '이름', '부서', '식사구분'])
+            
+        df_applied['식사일자'] = pd.to_datetime(df_applied['식사일자']).dt.strftime('%Y-%m-%d')
+        
+        # 3. 노쇼(No-Show) 명단 추출
         no_show = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='left', indicator=True)
-        no_show = no_show[no_show['_merge'] == 'left_only'].drop(columns=['_merge']).rename(columns={'부서_x':'부서'})[['식사일자', '이름', '부서', '식사구분']]
-
+        no_show = no_show[no_show['_merge'] == 'left_only'].drop(columns=['_merge']).rename(columns={'부서_x':'부서'})
+        no_show = no_show[['식사일자', '이름', '부서', '식사구분']]
+        
+        # 4. 미신청 식사(Unregistered) 추출 및 개발 의도 반영 (직영 직원만 필터링)
         unreg = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='right', indicator=True)
         unreg = unreg[unreg['_merge'] == 'right_only'].drop(columns=['_merge']).rename(columns={'부서_y':'부서'})
-        unreg = unreg[~unreg['부서'].isin(partner_depts)][['식사일자', '이름', '부서', '식사구분']]
-
-        partner_summary = df_actual[df_actual['부서'].isin(partner_depts)].groupby(['식사일자', '부서', '식사구분']).size().reset_index(name='인원수')
-
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        
+        # 💡 [수정 사항]: 사원 테이블의 type 권한을 조회하여 '직영' 사원만 명단 관리 대상으로 한정
+        conn = sqlite3.connect(DATABASE)
+        df_employees = pd.read_sql_query("SELECT name AS 이름, type FROM employees", conn)
+        conn.close()
+        
+        df_employees['이름'] = df_employees['이름'].apply(clean_name)
+        df_employees = df_employees.drop_duplicates(subset=['이름'])
+        
+        unreg_with_type = pd.merge(unreg, df_employees, on='이름', how='left')
+        
+        # 사원 구분이 정확히 '직영'인 대상만 최종 미신청 명단으로 추출 (협력사 명단 자동 제거)
+        unreg = unreg_with_type[unreg_with_type['type'] == '직영'][['식사일자', '이름', '부서', '식사구분']]
+        
+        # 5. 협력사별 식사자 통계 카운팅 (단순 숫자 통계 유지)
+        partner_depts = ['DEX', 'FBF-ENG', '하이테크주택', '신명전력', '주노텍']
+        partner_actual = df_actual[df_actual['부서'].isin(partner_depts)]
+        partner_summary = partner_actual.groupby(['식사일자', '부서', '식사구분']).size().reset_index(name='식사건수')
+        
+        # 6. 결과 엑셀 파일 다운로드 처리를 위한 Base64 변환
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            unreg.to_excel(writer, sheet_name='미신청 식사자 명단', index=False)
             no_show.to_excel(writer, sheet_name='노쇼 명단', index=False)
-            unreg.to_excel(writer, sheet_name='미신청 식사', index=False)
             partner_summary.to_excel(writer, sheet_name='협력사 식사 현황', index=False)
-
-        output.seek(0)
-        excel_base64 = base64.b64encode(output.getvalue()).decode('utf-8')
-        return jsonify({"success": True, "summary": {"no_show_count": len(no_show), "unreg_count": len(unreg), "partner_count": int(partner_summary['인원수'].sum()) if not partner_summary.empty else 0, "start_date": start_date, "end_date": end_date, "no_show_list": no_show.to_dict(orient='records'), "unreg_list": unreg.to_dict(orient='records'), "partner_list": partner_summary.to_dict(orient='records')}, "excel_file": excel_base64, "file_name": f"식수비교_{start_date}_{end_date}.xlsx"})
+            
+        excel_data = output.getvalue()
+        excel_base64 = base64.b64encode(excel_data).decode('utf-8')
+        
+        return jsonify({
+            "success": True,
+            "file_name": f"식사_분석결과_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            "excel_file": excel_base64
+        })
+        
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"❌ 자동 분석 에러: {str(e)}")
+        return jsonify({"error": f"분석 중 오류가 발생했습니다: {str(e)}"}), 500
 
 @app.route("/admin/stats/period/excel", methods=["GET"])
 def download_stats_period_excel():
