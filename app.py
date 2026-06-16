@@ -1233,7 +1233,6 @@ def compare_auto():
         file_bytes = file_actual.read()
         in_memory_file = io.BytesIO(file_bytes)
         
-        # 파일 포맷에 따른 데이터 결합 분기
         if zipfile.is_zipfile(in_memory_file):
             print("📊 [데이터 라이브러리] 특수 포맷 실적 자료 데이터 분석을 가동합니다.")
             in_memory_file.seek(0)
@@ -1256,6 +1255,9 @@ def compare_auto():
                                 row_cells[c_char] = t_node.text.strip()
                         
                         if row_cells:
+                            # 💡 [핵심 버그 수정] 복사할 때 딸려 들어온 제목 행("식사일자")은 데이터 목록에 넣지 않고 패스합니다.
+                            if row_cells.get('A') == "식사일자":
+                                continue
                             rows_list.append(row_cells)
                     
                     df_actual = pd.DataFrame(rows_list)
@@ -1269,6 +1271,7 @@ def compare_auto():
             df_actual.columns = df_actual.columns.str.strip()
             if '조직' in df_actual.columns: df_actual.rename(columns={'조직': '부서'}, inplace=True)
 
+        # 💡 "식사일자" 글자가 필터링되므로, 아래 pd.to_datetime 연산이 에러 없이 깨끗하게 통과합니다.
         df_actual['부서'] = df_actual['부서'].apply(clean_dept)
         df_actual['이름'] = df_actual['이름'].apply(clean_name)
         df_actual['식사일자'] = pd.to_datetime(df_actual['식사일자']).dt.strftime('%Y-%m-%d')
