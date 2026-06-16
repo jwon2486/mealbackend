@@ -27,6 +27,10 @@ import json, uuid
 from flask import send_from_directory
 from werkzeug.utils import secure_filename
 
+# [데이터 해독 익스텐션] 특수 포맷 실적 자료 해독을 위한 코어 모듈 추가
+import zipfile
+import xml.etree.ElementTree as ET
+
 # ============================================================================
 # 1. 환경 설정 및 상수 정의
 # ============================================================================
@@ -40,13 +44,13 @@ DB_PATH = "db.sqlite"
 MENU_UPLOAD_DIR = os.path.join(BASE_DIR, "uploads", "menu")
 MENU_MANIFEST_PATH = os.path.join(MENU_UPLOAD_DIR, "menu_board.json")
 MENU_ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp"}
-MENU_MAX_MB = 20  
+MENU_MAX_MB = 20   
 os.makedirs(MENU_UPLOAD_DIR, exist_ok=True)
 
 # ===== GitHub 백업 설정 =====
-GITHUB_REPO   = "jwon2486/MealDB-Backup"   
-GITHUB_BRANCH = "main"                     
-GITHUB_PATH   = "db.sqlite"                
+GITHUB_REPO   = "jwon2486/MealDB-Backup"    
+GITHUB_BRANCH = "main"                      
+GITHUB_PATH   = "db.sqlite"                 
 GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN")
 GITHUB_API    = "https://api.github.com"
 
@@ -65,7 +69,7 @@ def create_db_snapshot():
         backup_dir = os.path.join(BASE_DIR, "db_backups")
         os.makedirs(backup_dir, exist_ok=True)
         snapshot_path = os.path.join(backup_dir, f"db_{ts}.sqlite")
-        shutil.copy2(DATABASE, snapshot_path)   
+        shutil.copy2(DATABASE, snapshot_path)    
         return snapshot_path
     except Exception as e:
         print("❌ DB 스냅샷 생성 실패:", e)
@@ -118,9 +122,6 @@ def backup_db_to_github():
         upload_file_to_github(snapshot)
 
 def backup_worker_midnight():
-    """
-    매일 08시를 기점으로 3시간 간격마다 정해진 시각에 DB 백업을 실행하는 워커
-    """
     while True:
         now_kst = datetime.now(KST)
         target_hours = [2, 5, 8, 11, 14, 17, 20, 23]
@@ -181,7 +182,7 @@ def allowed_menu_file(filename):
 # ============================================================================
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "snsys_meal_secret_fallback_key")
-CORS(app) 
+CORS(app)
 
 def get_db_connection():
      conn = sqlite3.connect("db.sqlite")
@@ -189,7 +190,6 @@ def get_db_connection():
      return conn
 
 def init_db_deadline_extensions(cursor):
-    """마감시간 제어를 위한 설정 테이블 생성 및 초기화 데이터 적재"""
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS deadline_settings (
             key TEXT PRIMARY KEY,
@@ -301,18 +301,16 @@ def init_db():
     )
     """)
 
-    # 💡 마감 제어 누락 익스텐션 테이블 생성 연동
     init_db_deadline_extensions(cursor)
 
     conn.commit()
     conn.close()
 
 # ============================================================================
-# 5. [핵심] 실시간 보정용 서버 시각 엔드포인트 API
+# 5. 실시간 보정용 서버 시각 엔드포인트 API
 # ============================================================================
 @app.route("/api/server-time", methods=["GET"])
 def get_server_time():
-    """백엔드 서버가 구동 중인 환경의 정확한 한국 표준시(KST)를 반환"""
     return jsonify({
         "server_time": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
         "server_date": datetime.now(KST).strftime("%Y-%m-%d")
@@ -1220,9 +1218,11 @@ def get_stats_period():
     conn.close()
     return jsonify(result), 200
 
+# [API 개편] 특수 서식 포맷 자료와 정식 XLSX를 통합 판별하는 정산 엔진
 @app.route('/admin/stats/compare-auto', methods=['POST'])
 def compare_auto():
-    if 'actual' not in request.files: return jsonify({"error": "실적자료 누락"}), 400
+    if 'actual' not in request.files: 
+        return jsonify({"error": "실적자료 누락"}), 400
     file_actual = request.files['actual']
     partner_depts = ['DEX', 'FBF-ENG', '하이테크주택', '신명전력', '주노텍']
 
@@ -1230,9 +1230,44 @@ def compare_auto():
     clean_dept = lambda d: re.sub(r'\(.*?\)', '', str(d).strip()).strip() if d else ""
 
     try:
-        df_actual = pd.read_excel(file_actual, engine='openpyxl')
-        df_actual.columns = df_actual.columns.str.strip()
-        if '조직' in df_actual.columns: df_actual.rename(columns={'조직': '부서'}, inplace=True)
+        file_bytes = file_actual.read()
+        in_memory_file = io.BytesIO(file_bytes)
+        
+        # 파일 포맷에 따른 데이터 결합 분기
+        if zipfile.is_zipfile(in_memory_file):
+            print("📊 [데이터 라이브러리] 특수 포맷 실적 자료 데이터 분석을 가동합니다.")
+            in_memory_file.seek(0)
+            
+            with zipfile.ZipFile(in_memory_file, 'r') as z:
+                if "xl/worksheets/sheet1.xml" in z.namelist():
+                    xml_data = z.read("xl/worksheets/sheet1.xml")
+                    root_xml = ET.fromstring(xml_data)
+                    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                    
+                    rows_list = []
+                    for row_node in root_xml.findall(f".//{{{ns}}}row"):
+                        row_cells = {}
+                        for c_node in row_node.findall(f".//{{{ns}}}c"):
+                            cell_ref = c_node.get("r")
+                            c_char = "".join([ch for ch in cell_ref if ch.isalpha()])
+                            
+                            t_node = c_node.find(f".//{{{ns}}}t")
+                            if t_node is not None and t_node.text:
+                                row_cells[c_char] = t_node.text.strip()
+                        
+                        if row_cells:
+                            rows_list.append(row_cells)
+                    
+                    df_actual = pd.DataFrame(rows_list)
+                    df_actual.rename(columns={'A': '식사일자', 'B': '이름', 'C': '부서', 'D': '식사구분'}, inplace=True)
+                else:
+                    return jsonify({"error": "실적 데이터 파일 내부에 유효한 데이터 구조가 없습니다."}), 400
+        else:
+            print("📊 [표준 로드 라이브러리] 표준형 엑셀(XLSX) 포맷으로 실적 데이터를 변환합니다.")
+            in_memory_file.seek(0)
+            df_actual = pd.read_excel(in_memory_file, engine='openpyxl')
+            df_actual.columns = df_actual.columns.str.strip()
+            if '조직' in df_actual.columns: df_actual.rename(columns={'조직': '부서'}, inplace=True)
 
         df_actual['부서'] = df_actual['부서'].apply(clean_dept)
         df_actual['이름'] = df_actual['이름'].apply(clean_name)
@@ -1252,13 +1287,22 @@ def compare_auto():
             if row['lunch'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': c_name, '부서': row['부서'], '식사구분': '중식'})
             if row['dinner'] == 1: applied_rows.append({'식사일자': row['식사일자'], '이름': c_name, '부서': row['부서'], '식사구분': '석식'})
         
-        df_applied = pd.DataFrame(applied_rows)
-        no_show = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='left', indicator=True)
-        no_show = no_show[no_show['_merge'] == 'left_only'].drop(columns=['_merge']).rename(columns={'부서_x':'부서'})[['식사일자', '이름', '부서', '식사구분']]
+        df_applied = pd.DataFrame(applied_rows) if applied_rows else pd.DataFrame(columns=['식사일자', '이름', '부서', '식사구분'])
+        
+        if df_applied.empty:
+            no_show = pd.DataFrame(columns=['식사일자', '이름', '부서', '식사구분'])
+            unreg = df_actual.copy()
+        else:
+            no_show = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='left', indicator=True)
+            no_show = no_show[no_show['_merge'] == 'left_only'].drop(columns=['_merge']).rename(columns={'부서_x':'부서'})
+            if not no_show.empty:
+                no_show = no_show[['식사일자', '이름', '부서', '식사구분']]
 
-        unreg = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='right', indicator=True)
-        unreg = unreg[unreg['_merge'] == 'right_only'].drop(columns=['_merge']).rename(columns={'부서_y':'부서'})
-        unreg = unreg[~unreg['부서'].isin(partner_depts)][['식사일자', '이름', '부서', '식사구분']]
+            unreg = pd.merge(df_applied, df_actual, on=['식사일자', '이름', '식사구분'], how='right', indicator=True)
+            unreg = unreg[unreg['_merge'] == 'right_only'].drop(columns=['_merge']).rename(columns={'부서_y':'부서'})
+            unreg = unreg[~unreg['부서'].isin(partner_depts)]
+            if not unreg.empty:
+                unreg = unreg[['식사일자', '이름', '부서', '식사구분']]
 
         partner_summary = df_actual[df_actual['부서'].isin(partner_depts)].groupby(['식사일자', '부서', '식사구분']).size().reset_index(name='인원수')
 
@@ -1272,6 +1316,7 @@ def compare_auto():
         excel_base64 = base64.b64encode(output.getvalue()).decode('utf-8')
         return jsonify({"success": True, "summary": {"no_show_count": len(no_show), "unreg_count": len(unreg), "partner_count": int(partner_summary['인원수'].sum()) if not partner_summary.empty else 0, "start_date": start_date, "end_date": end_date, "no_show_list": no_show.to_dict(orient='records'), "unreg_list": unreg.to_dict(orient='records'), "partner_list": partner_summary.to_dict(orient='records')}, "excel_file": excel_base64, "file_name": f"식수비교_{start_date}_{end_date}.xlsx"})
     except Exception as e:
+        print("❌ 위장 데이터 연산 및 대조 분석 실패:", e)
         return jsonify({"error": str(e)}), 500
 
 @app.route("/admin/stats/period/excel", methods=["GET"])
@@ -1377,7 +1422,7 @@ def weekly_dept_stats():
     return jsonify(list(dept_map.values()))
 
 @app.route("/admin/stats/weekly_dept/excel")
-def weekly_dept_excel():
+def download_weekly_dept_excel():
     start, end = request.args.get("start"), request.args.get("end")
     conn = get_db_connection()
     rows = conn.execute("SELECT m.date, m.breakfast, m.lunch, m.dinner, e.name, e.dept, e.type FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", (start, end)).fetchall()
@@ -1548,9 +1593,6 @@ def start_backup_thread():
 
 if __name__ == "__main__":
     init_db()               
-    
-    # 💡 [핵심 버그 수정]: 무한 루프가 포함된 백업 스레드를 Flask 서버 가동 직전에 '독립 스레드'로 트리거합니다.
     start_backup_thread()   
-    
-    port = int(os.environ.get("PORT", 5000)) 
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
