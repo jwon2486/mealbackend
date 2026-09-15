@@ -21,6 +21,7 @@ import requests
 import ssl
 from requests.adapters import HTTPAdapter
 import base64
+import hashlib
 import threading
 import time
 import json, uuid
@@ -63,17 +64,103 @@ def get_week_range_kst():
     friday = monday + timedelta(days=4)
     return monday, friday
 
-def create_db_snapshot():
+SNAPSHOT_KEEP = 24          # db_backups 로컬 보관 개수 (3시간 주기 기준 약 3일치, 약 160MB)
+BACKUP_INTERVAL_HOURS = 3   # 자동 백업 주기(시간)
+BACKUP_ANCHOR_HOUR = 2      # 기준 시각. 여기서 주기마다 실행 → 3시간 주기면 2,5,8,11,14,17,20,23시
+
+
+def clean_old_snapshots(backup_dir, keep=SNAPSHOT_KEEP):
+    """db_backups 폴더가 무한정 커지지 않도록 오래된 스냅샷을 정리."""
+    if keep <= 0:
+        return
     try:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        names = sorted(
+            n for n in os.listdir(backup_dir)
+            if n.startswith("db_") and n.endswith(".sqlite")
+        )
+        for name in names[:-keep]:
+            try:
+                os.remove(os.path.join(backup_dir, name))
+                print(f"🧹 [백업] 오래된 스냅샷 삭제: {name}")
+            except OSError as e:
+                print(f"⚠️ [백업] 스냅샷 삭제 실패({name}):", e)
+    except Exception as e:
+        print("⚠️ [백업] 스냅샷 정리 실패:", e)
+
+
+def verify_snapshot(snapshot_path):
+    """업로드 전 스냅샷 건전성 검사. 깨졌거나 비어 있으면 업로드하지 않는다."""
+    try:
+        conn = sqlite3.connect(f"file:{snapshot_path}?mode=ro", uri=True)
+        try:
+            status = conn.execute("PRAGMA quick_check").fetchone()[0]
+            if status != "ok":
+                print(f"❌ [백업] 스냅샷 무결성 실패({status}) → 업로드 중단")
+                return False
+            # 테이블이 하나도 없으면 사실상 빈 DB다. 이런 파일이 올라가면
+            # 백업 리포의 정상 DB를 덮어쓰게 되므로 반드시 막는다.
+            n = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0]
+            if n == 0:
+                print("❌ [백업] 스냅샷에 테이블이 없습니다(빈 DB) → 업로드 중단")
+                return False
+        finally:
+            conn.close()
+        size = os.path.getsize(snapshot_path)
+        print(f"🔎 [백업] 스냅샷 검증 통과: 테이블 {n}개, {size:,} bytes")
+        return True
+    except Exception as e:
+        print("❌ [백업] 스냅샷 검증 실패 → 업로드 중단:", e)
+        return False
+
+
+def create_db_snapshot():
+    """실행 중인 db.sqlite를 일관된 시점으로 복사해서 스냅샷 파일 경로를 반환."""
+    try:
+        # sqlite3.connect()는 파일이 없으면 "빈 DB를 새로 만든다". 그대로 두면
+        # 원본이 사라진 상황에서 빈 DB가 정상 백업을 덮어쓴다. mode=ro 로 열어
+        # 생성을 원천 차단하고, 그 전에 존재 여부도 명시적으로 확인한다.
+        if not os.path.exists(DATABASE):
+            print(f"❌ DB 스냅샷 생략: 원본 DB가 없습니다 ({DATABASE})")
+            return None
+
+        ts = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
         backup_dir = os.path.join(BASE_DIR, "db_backups")
         os.makedirs(backup_dir, exist_ok=True)
         snapshot_path = os.path.join(backup_dir, f"db_{ts}.sqlite")
-        shutil.copy2(DATABASE, snapshot_path)    
+
+        # shutil.copy2는 SQLite를 모르는 단순 바이트 복사다. journal_mode가 기본값
+        # (delete)이므로 쓰기 트랜잭션 도중에 복사하면 "변경이 절반만 반영된 본체 +
+        # 되돌릴 journal 없음" 상태가 백업될 수 있다. sqlite3의 온라인 백업 API는
+        # 읽기 잠금을 잡고 페이지를 복사하며 도중에 원본이 바뀌면 재시작하므로
+        # 항상 트랜잭션적으로 일관된 사본을 만든다.
+        src_conn = sqlite3.connect(f"file:{DATABASE}?mode=ro", uri=True)
+        dst_conn = sqlite3.connect(snapshot_path)
+        try:
+            with dst_conn:
+                src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+            src_conn.close()
+
+        if not verify_snapshot(snapshot_path):
+            return None
+
+        clean_old_snapshots(backup_dir)
         return snapshot_path
     except Exception as e:
         print("❌ DB 스냅샷 생성 실패:", e)
         return None
+
+
+def _git_blob_sha1(data):
+    """GitHub contents API가 돌려주는 blob sha와 같은 값을 로컬에서 계산."""
+    h = hashlib.sha1()
+    h.update(b"blob " + str(len(data)).encode() + bytes([0]))
+    h.update(data)
+    return h.hexdigest()
+
 
 def upload_file_to_github(file_path):
     if not GITHUB_TOKEN:
@@ -81,7 +168,8 @@ def upload_file_to_github(file_path):
         return
 
     with open(file_path, "rb") as f:
-        content_b64 = base64.b64encode(f.read()).decode("utf-8")
+        raw = f.read()
+    content_b64 = base64.b64encode(raw).decode("utf-8")
 
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -90,11 +178,23 @@ def upload_file_to_github(file_path):
     url = f"{GITHUB_API}/repos/{GITHUB_REPO}/contents/{GITHUB_PATH}"
 
     sha = None
-    get_resp = requests.get(url, headers=headers, params={"ref": GITHUB_BRANCH})
-    if get_resp.status_code == 200:
-        sha = get_resp.json().get("sha")
+    try:
+        get_resp = requests.get(
+            url, headers=headers, params={"ref": GITHUB_BRANCH}, timeout=30
+        )
+        if get_resp.status_code == 200:
+            sha = get_resp.json().get("sha")
+    except Exception as e:
+        print("⚠️ [백업] 기존 파일 정보 조회 실패(그대로 업로드 진행):", e)
 
-    now_kst_iso = datetime.now(KST).isoformat()
+    # 1시간 주기로 무조건 커밋하면 6MB대 바이너리가 커밋마다 git 히스토리에 통째로
+    # 쌓여 백업 리포가 하루 150MB씩 커진다(바이너리는 델타 압축이 안 됨).
+    # 내용이 직전 백업과 완전히 동일할 때만 커밋을 생략한다. sha를 못 구했으면
+    # 생략하지 않고 업로드하는 쪽(fail-open)으로 처리해서 백업 누락을 막는다.
+    if sha and sha == _git_blob_sha1(raw):
+        print(f"⏭ [백업] DB 내용 변경 없음 → 업로드 생략 (sha {sha[:8]})")
+        return
+
     now_kst_string = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
 
     payload = {
@@ -110,9 +210,9 @@ def upload_file_to_github(file_path):
     if sha:
         payload["sha"] = sha
 
-    put_resp = requests.put(url, headers=headers, json=payload)
+    put_resp = requests.put(url, headers=headers, json=payload, timeout=120)
     if 200 <= put_resp.status_code < 300:
-        print(f"✅ GitHub DB 백업 성공: {file_path}")
+        print(f"✅ GitHub DB 백업 성공: {os.path.basename(file_path)} ({len(raw):,} bytes)")
     else:
         print("❌ GitHub DB 백업 실패:", put_resp.status_code, put_resp.text)
 
@@ -121,33 +221,41 @@ def backup_db_to_github():
     if snapshot:
         upload_file_to_github(snapshot)
 
-def backup_worker_midnight():
-    while True:
-        now_kst = datetime.now(KST)
-        target_hours = [2, 5, 8, 11, 14, 17, 20, 23]
-        next_hour = next((h for h in target_hours if h > now_kst.hour), target_hours[0])
-        
-        if next_hour <= now_kst.hour:
-            next_run_kst = (now_kst + timedelta(days=1)).replace(
-                hour=next_hour, minute=0, second=0, microsecond=0
-            )
-        else:
-            next_run_kst = now_kst.replace(
-                hour=next_hour, minute=0, second=0, microsecond=0
-            )
-            
-        wait_seconds = (next_run_kst - now_kst).total_seconds()
-        print(f"🕛 [백업] 다음 예약 실행(KST): {next_run_kst.strftime('%Y-%m-%d %H:%M:%S')} (대기 {int(wait_seconds)}초)")
-        
-        if wait_seconds > 0:
-            time.sleep(wait_seconds)
+def next_backup_time(now_kst):
+    """BACKUP_ANCHOR_HOUR 부터 BACKUP_INTERVAL_HOURS 간격으로 고정된 정각 슬롯 중
+    now 이후 가장 가까운 시각을 반환.
 
+    "현재 시각 + 주기"로 계산하면 인스턴스가 재시작될 때마다 백업 시각이 밀린다.
+    고정 슬롯 방식은 몇 번 재시작해도 항상 같은 시각에 백업된다."""
+    n_slots = max(1, 24 // BACKUP_INTERVAL_HOURS)
+    slots = sorted({(BACKUP_ANCHOR_HOUR + i * BACKUP_INTERVAL_HOURS) % 24
+                    for i in range(n_slots)})
+    base = now_kst.replace(minute=0, second=0, microsecond=0)
+    for h in slots:
+        cand = base.replace(hour=h)
+        if cand > now_kst:
+            return cand
+    return (base + timedelta(days=1)).replace(hour=slots[0])
+
+
+def backup_worker_periodic():
+    """정해진 시각마다 DB를 GitHub로 백업하는 워커. daemon 스레드에서 무한 루프로 돈다."""
+    while True:
         try:
-            print(f"⏱ [백업] {next_run_kst.hour}시 정기 DB 백업 실행(KST) ...")
+            now_kst = datetime.now(KST)
+            next_run_kst = next_backup_time(now_kst)
+            wait_seconds = (next_run_kst - now_kst).total_seconds()
+            print(f"🕛 [백업] 다음 예약 실행(KST): {next_run_kst.strftime('%Y-%m-%d %H:%M:%S')} (대기 {int(wait_seconds)}초)")
+
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+
+            print(f"⏱ [백업] {next_run_kst.strftime('%H시')} 정기 DB 백업 실행(KST) ...")
             backup_db_to_github()
         except Exception as e:
-            print(f"❌ [백업] {next_run_kst.hour}시 백업 중 오류:", e)
-        
+            # 루프가 죽으면 백업이 영구 중단되므로 어떤 예외든 삼키고 계속 돈다.
+            print("❌ [백업] 주기 백업 중 오류:", e)
+
         time.sleep(1)
 
 # ============================================================================
@@ -205,6 +313,49 @@ def init_db_deadline_extensions(cursor):
     ]
     for key, val in default_settings:
         cursor.execute("INSERT OR IGNORE INTO deadline_settings (key, value) VALUES (?, ?)", (key, val))
+
+def init_db_org_extensions(cursor):
+    """조직 트리 + 재직상태 스키마. 데이터는 마이그레이션 스크립트가 채운다."""
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS department_tree (
+            id         INTEGER PRIMARY KEY,
+            dept_name  TEXT NOT NULL,
+            parent_id  INTEGER REFERENCES department_tree(id),
+            meal_group INTEGER DEFAULT 0,   -- 화면에서 한 줄이 될 노드(표시 단위)
+            sort_order INTEGER DEFAULT 0,   -- 조직도 순서
+            is_active  INTEGER DEFAULT 1,   -- 없어진 부서는 0
+            UNIQUE(dept_name, parent_id)
+        )
+    """)
+
+    cols = {row[1] for row in cursor.execute("PRAGMA table_info(employees)")}
+    if "dept_id" not in cols:
+        cursor.execute("ALTER TABLE employees ADD COLUMN dept_id INTEGER REFERENCES department_tree(id)")
+    if "status" not in cols:
+        cursor.execute("ALTER TABLE employees ADD COLUMN status TEXT DEFAULT '재직'")
+    if "resigned_at" not in cols:
+        cursor.execute("ALTER TABLE employees ADD COLUMN resigned_at TEXT")
+
+    # 소속 노드 -> 표시 단위(깃발) 매핑. 깃발에서 아래로 내려가되 다음 깃발에서 끊는다.
+    cursor.execute("DROP VIEW IF EXISTS dept_group")
+    cursor.execute("""
+        CREATE VIEW dept_group AS
+        WITH RECURSIVE sub(grp_id, id) AS (
+            SELECT id, id FROM department_tree WHERE meal_group = 1
+          UNION ALL
+            SELECT s.grp_id, d.id
+              FROM department_tree d JOIN sub s ON d.parent_id = s.id
+             WHERE d.meal_group = 0
+        )
+        SELECT sub.id AS dept_id, g.id AS group_id,
+               g.dept_name AS group_name, g.sort_order
+          FROM sub JOIN department_tree g ON g.id = sub.grp_id
+    """)
+
+
+# 퇴사자는 소속 부서와 무관하게 화면에서 한 줄로 묶는다.
+RESIGNED_LABEL = "퇴사자"
+
 
 def init_db():
     conn = get_db_connection()
@@ -302,6 +453,7 @@ def init_db():
     """)
 
     init_db_deadline_extensions(cursor)
+    init_db_org_extensions(cursor)
 
     conn.commit()
     conn.close()
@@ -971,12 +1123,20 @@ def admin_edit_meals():
 @app.route("/admin/employees", methods=["GET"])
 def get_employees():
     name = request.args.get("name", "").strip()
-    conn = get_db_connection()
+    # 기본은 재직자만. 퇴사자까지 보려면 ?include_resigned=1
+    include_resigned = request.args.get("include_resigned", "").strip() in ("1", "true", "Y")
+
+    where, params = [], []
     if name:
-        cursor = conn.execute("SELECT * FROM employees WHERE name = ?", (name,))
-    else:
-        cursor = conn.execute("SELECT * FROM employees")
-    employees = cursor.fetchall()
+        where.append("name = ?"); params.append(name)
+    if not include_resigned:
+        where.append("IFNULL(status, '재직') = '재직'")
+    sql = "SELECT * FROM employees"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+
+    conn = get_db_connection()
+    employees = conn.execute(sql, params).fetchall()
     conn.close()
     return jsonify([dict(emp) for emp in employees])
 
@@ -1029,11 +1189,24 @@ def update_employee(emp_id):
 
 @app.route("/admin/employees/<emp_id>", methods=["DELETE"])
 def delete_employee(emp_id):
+    """행을 지우지 않고 퇴사 처리한다.
+       삭제하면 meals JOIN employees 가 끊겨 그 사람이 먹은 식사가 정산에서 빠진다."""
+    resigned_at = (request.args.get("resigned_at") or "").strip() or now_kst_str()[:10]
     conn = get_db_connection()
-    conn.execute("DELETE FROM employees WHERE id = ?", (emp_id,))
+    conn.execute("UPDATE employees SET status = '퇴사', resigned_at = ? WHERE id = ?",
+                 (resigned_at, emp_id))
     conn.commit()
     conn.close()
-    return jsonify({"success": True})
+    return jsonify({"success": True, "status": "퇴사", "resigned_at": resigned_at})
+
+@app.route("/admin/employees/<emp_id>/restore", methods=["POST"])
+def restore_employee(emp_id):
+    """퇴사 처리 취소."""
+    conn = get_db_connection()
+    conn.execute("UPDATE employees SET status = '재직', resigned_at = NULL WHERE id = ?", (emp_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "status": "재직"})
 
 @app.route("/admin/employees/upload", methods=["POST"])
 def upload_employees():
@@ -1056,7 +1229,7 @@ def upload_employees():
                 ON CONFLICT(id) DO UPDATE SET name=excluded.name, dept=excluded.dept, type=excluded.type, region=excluded.region, rank=excluded.rank
             """, (row["id"], row["name"], row["dept"], row["rank"] if "rank" in row else "", row["type"], row["region"]))
         conn.commit()
-        cursor = conn.execute("SELECT * FROM employees")
+        cursor = conn.execute("SELECT * FROM employees WHERE IFNULL(status, '재직') = '재직'")
         employees = [dict(emp) for emp in cursor.fetchall()]
         conn.close()
         return jsonify(employees), 200
@@ -1080,7 +1253,7 @@ def login_check():
         return jsonify({"error": "사번과 이름을 모두 입력하세요"}), 400
 
     conn = get_db_connection()
-    cursor = conn.execute("SELECT id, name, dept, rank, type, level, region FROM employees WHERE id = ? AND name = ?", (emp_id, name))
+    cursor = conn.execute("SELECT id, name, dept, rank, type, level, region FROM employees WHERE id = ? AND name = ? AND IFNULL(status, '재직') = '재직'", (emp_id, name))
     user = cursor.fetchone()
     conn.close()
 
@@ -1390,39 +1563,69 @@ def download_dept_summary_excel():
 def weekly_dept_stats():
     start, end = request.args.get("start"), request.args.get("end")
     conn = get_db_connection()
-    employees = conn.execute("SELECT id, name, dept, type, region FROM employees").fetchall()
-    dept_members = defaultdict(list)
-    for e in employees: dept_members[(e["dept"], e["type"], e["region"])].append(e["id"])
+    # 표시 단위(깃발) 기준으로 부서를 묶는다. 부서명을 자르지 않는다.
+    emp_info = {r["id"]: r for r in conn.execute("""
+        SELECT e.id, e.name, e.type, e.region,
+               IFNULL(e.status, '재직')      AS status,
+               IFNULL(g.group_name, e.dept)  AS grp,
+               IFNULL(g.sort_order, 999999)  AS sort_order
+          FROM employees e
+          LEFT JOIN dept_group g ON g.dept_id = e.dept_id
+    """).fetchall()}
 
     dept_map = {}
-    for (dept, type_, region), ids in dept_members.items():
-        if type_ == "직영" and region != "에코센터": continue
-        dept_map[dept] = {"type": type_, "dept": dept, "display_dept": dept, "total": len(ids), "days": {}}
-    
-    meal_rows = conn.execute("SELECT m.date, e.name, e.dept, e.type, e.region, m.breakfast, m.lunch, m.dinner FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", (start, end)).fetchall()
-    for row in meal_rows:
-        date, name, dept, type_, region = row["date"], row["name"], row["dept"], row["type"], row["region"]
-        dept_key = f"{dept[:4]}(출장)" if type_ == "직영" and region != "에코센터" else dept
-        if dept_key not in dept_map:
-            dept_map[dept_key] = {"type": type_, "dept": dept_key, "display_dept": dept_key, "total": 1, "days": {}}
-        
-        for meal, key in zip(["breakfast", "lunch", "dinner"], ["b", "l", "d"]):
-            if row[meal] > 0:
-                dept_map[dept_key]["days"].setdefault(date, {"b":[], "l":[], "d":[]})[key].append(name)
 
-    visitor_rows = conn.execute("SELECT v.date, v.breakfast, v.lunch, v.dinner, e.name, e.dept, v.type FROM visitors v JOIN employees e ON v.applicant_id = e.id WHERE v.date BETWEEN ? AND ?", (start, end)).fetchall()
-    for row in visitor_rows:
-        date, name, dept, vtype = row["date"], row["name"], row["dept"], row["type"]
-        dept_key = f"{dept[:2]}(방문자)" if vtype == "방문자" else dept
-        if dept_key not in dept_map:
-            dept_map[dept_key] = {"type": vtype, "dept": dept_key, "display_dept": dept_key, "total": 1, "days": {}}
-        
+    def ensure(key, type_, sort_order, total=0):
+        if key not in dept_map:
+            dept_map[key] = {"type": type_, "dept": key, "display_dept": key,
+                             "total": total, "days": {}, "sort_order": sort_order}
+        return dept_map[key]
+
+    # 상시 노출 행 — 에코센터 직영 + 협력사. 정원은 재직자만 센다.
+    for info in emp_info.values():
+        if info["status"] != "재직":
+            continue
+        if info["type"] == "직영" and info["region"] != "에코센터":
+            continue
+        ensure(info["grp"], info["type"], info["sort_order"])["total"] += 1
+
+    meal_rows = conn.execute("SELECT m.user_id, m.date, m.breakfast, m.lunch, m.dinner FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", (start, end)).fetchall()
+    for row in meal_rows:
+        info = emp_info.get(row["user_id"])
+        if info is None:
+            continue
+        if info["status"] != "재직":
+            # 퇴사자는 소속과 무관하게 한 줄로 묶는다.
+            grp, sort_order, type_ = RESIGNED_LABEL, 999998, info["type"]
+        else:
+            grp, sort_order, type_ = info["grp"], info["sort_order"], info["type"]
+            # 에코센터 외 근무자는 신청이 있을 때만 (출장) 행으로 나타난다.
+            if type_ == "직영" and info["region"] != "에코센터":
+                grp, sort_order = f"{grp}(출장)", sort_order + 1
+        ensure(grp, type_, sort_order, total=1)
         for meal, key in zip(["breakfast", "lunch", "dinner"], ["b", "l", "d"]):
             if row[meal] > 0:
-                dept_map[dept_key]["days"].setdefault(date, {"b":[], "l":[], "d":[]})[key].append(f"{name}({row[meal]})")
+                dept_map[grp]["days"].setdefault(row["date"], {"b": [], "l": [], "d": []})[key].append(info["name"])
+
+    visitor_rows = conn.execute("SELECT v.applicant_id, v.applicant_name, v.date, v.breakfast, v.lunch, v.dinner, v.type FROM visitors v JOIN employees e ON v.applicant_id = e.id WHERE v.date BETWEEN ? AND ?", (start, end)).fetchall()
+    for row in visitor_rows:
+        info = emp_info.get(row["applicant_id"])
+        if info is None:
+            continue
+        vtype = row["type"]
+        grp, sort_order = info["grp"], info["sort_order"]
+        if info["status"] != "재직":
+            grp, sort_order = RESIGNED_LABEL, 999998
+        if vtype == "방문자":
+            grp, sort_order = f"{grp}(방문자)", sort_order + 2
+        ensure(grp, vtype, sort_order, total=1)
+        name = row["applicant_name"] or info["name"]
+        for meal, key in zip(["breakfast", "lunch", "dinner"], ["b", "l", "d"]):
+            if row[meal] > 0:
+                dept_map[grp]["days"].setdefault(row["date"], {"b": [], "l": [], "d": []})[key].append(f"{name}({row[meal]})")
 
     conn.close()
-    return jsonify(list(dept_map.values()))
+    return jsonify(sorted(dept_map.values(), key=lambda r: (r["sort_order"], r["dept"])))
 
 @app.route("/admin/stats/weekly_dept/excel")
 def download_weekly_dept_excel():
@@ -1441,23 +1644,34 @@ def download_weekly_dept_excel():
 def download_pivot_excel():
     start, end = request.args.get("start"), request.args.get("end")
     conn = sqlite3.connect("db.sqlite")
-    df_meals = pd.read_sql_query("SELECT m.date, m.breakfast, m.lunch, m.dinner, e.name, e.dept, e.type, e.region FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", conn, params=(start, end))
+    # 부서 열에는 소속 노드의 정식 명칭을 그대로 쓴다 (예: 전력시스템팀(설계-부산)).
+    df_meals = pd.read_sql_query("""
+        SELECT m.date, m.breakfast, m.lunch, m.dinner, e.name,
+               IFNULL(d.dept_name, e.dept) AS dept,
+               e.type, e.region,
+               IFNULL(e.status, '재직')     AS status
+          FROM meals m
+          JOIN employees e ON m.user_id = e.id
+          LEFT JOIN department_tree d ON d.id = e.dept_id
+         WHERE m.date BETWEEN ? AND ?
+    """, conn, params=(start, end))
     df_visitors = pd.read_sql_query("SELECT v.applicant_name, v.date, v.breakfast, v.lunch, v.dinner, v.type, e.dept, e.type as emp_type FROM visitors v LEFT JOIN employees e ON v.applicant_id = e.id WHERE v.date BETWEEN ? AND ?", conn, params=(start, end))
     conn.close()
 
     eco_center, tech_center = [], []
     for _, row in df_meals.iterrows():
         if row.get("type") != "직영": continue
-        base = [row["date"], row["name"], row["dept"]]
+        base = [row["date"], row["name"], row["dept"], row.get("status", "재직")]
         target = eco_center if row.get("region") == "에코센터" else tech_center
         if int(row.get("breakfast", 0)) == 1: target.append(base + ["조식"])
         if int(row.get("lunch", 0)) == 1: target.append(base + ["중식"])
         if int(row.get("dinner", 0)) == 1: target.append(base + ["석식"])
 
+    cols = ["식사일자", "이름", "부서", "재직상태", "식사 구분"]
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        pd.DataFrame(eco_center, columns=["식사일자", "이름", "부서", "식사 구분"]).to_excel(writer, index=False, sheet_name="직영_에코센터")
-        pd.DataFrame(tech_center, columns=["식사일자", "이름", "부서", "식사 구분"]).to_excel(writer, index=False, sheet_name="직영_출장")
+        pd.DataFrame(eco_center, columns=cols).to_excel(writer, index=False, sheet_name="직영_에코센터")
+        pd.DataFrame(tech_center, columns=cols).to_excel(writer, index=False, sheet_name="직영_출장")
     output.seek(0)
     return send_file(output, as_attachment=True, download_name="pivot_meals.xlsx")
 
@@ -1590,12 +1804,20 @@ def start_backup_thread():
     with backup_thread_lock:
         if not backup_thread_started:
             print("🚀 [백업] 안전망 분리: DB 백업 대기 워커 스레드 시동 완료")
-            t = threading.Thread(target=backup_worker_midnight, daemon=True)
+            t = threading.Thread(target=backup_worker_periodic, daemon=True)
             t.start()
             backup_thread_started = True
 
+# ⚠️ 이 호출은 반드시 모듈 레벨(= import 시점)에 있어야 한다.
+#    운영 서버는 `gunicorn app:app` 으로 이 파일을 import 하므로
+#    아래 `if __name__ == "__main__":` 블록은 운영에서 실행되지 않는다.
+#    이 줄을 __main__ 안으로 옮기면 로컬(python app.py)에서만 백업이 돌고
+#    운영에서는 에러 한 줄 없이 조용히 백업이 멈춘다.
+#    (실제 사고: 2026-06-02 ~ 2026-09-15, 약 3개월간 자동 백업 중단)
+#    백업 루프는 daemon 스레드 안에서 돌기 때문에 여기서 호출해도 import를 막지 않는다.
+start_backup_thread()
+
 if __name__ == "__main__":
     init_db()               
-    start_backup_thread()   
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
