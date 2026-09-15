@@ -314,49 +314,6 @@ def init_db_deadline_extensions(cursor):
     for key, val in default_settings:
         cursor.execute("INSERT OR IGNORE INTO deadline_settings (key, value) VALUES (?, ?)", (key, val))
 
-def init_db_org_extensions(cursor):
-    """조직 트리 + 재직상태 스키마. 데이터는 마이그레이션 스크립트가 채운다."""
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS department_tree (
-            id         INTEGER PRIMARY KEY,
-            dept_name  TEXT NOT NULL,
-            parent_id  INTEGER REFERENCES department_tree(id),
-            meal_group INTEGER DEFAULT 0,   -- 화면에서 한 줄이 될 노드(표시 단위)
-            sort_order INTEGER DEFAULT 0,   -- 조직도 순서
-            is_active  INTEGER DEFAULT 1,   -- 없어진 부서는 0
-            UNIQUE(dept_name, parent_id)
-        )
-    """)
-
-    cols = {row[1] for row in cursor.execute("PRAGMA table_info(employees)")}
-    if "dept_id" not in cols:
-        cursor.execute("ALTER TABLE employees ADD COLUMN dept_id INTEGER REFERENCES department_tree(id)")
-    if "status" not in cols:
-        cursor.execute("ALTER TABLE employees ADD COLUMN status TEXT DEFAULT '재직'")
-    if "resigned_at" not in cols:
-        cursor.execute("ALTER TABLE employees ADD COLUMN resigned_at TEXT")
-
-    # 소속 노드 -> 표시 단위(깃발) 매핑. 깃발에서 아래로 내려가되 다음 깃발에서 끊는다.
-    cursor.execute("DROP VIEW IF EXISTS dept_group")
-    cursor.execute("""
-        CREATE VIEW dept_group AS
-        WITH RECURSIVE sub(grp_id, id) AS (
-            SELECT id, id FROM department_tree WHERE meal_group = 1
-          UNION ALL
-            SELECT s.grp_id, d.id
-              FROM department_tree d JOIN sub s ON d.parent_id = s.id
-             WHERE d.meal_group = 0
-        )
-        SELECT sub.id AS dept_id, g.id AS group_id,
-               g.dept_name AS group_name, g.sort_order
-          FROM sub JOIN department_tree g ON g.id = sub.grp_id
-    """)
-
-
-# 퇴사자는 소속 부서와 무관하게 화면에서 한 줄로 묶는다.
-RESIGNED_LABEL = "퇴사자"
-
-
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -453,7 +410,6 @@ def init_db():
     """)
 
     init_db_deadline_extensions(cursor)
-    init_db_org_extensions(cursor)
 
     conn.commit()
     conn.close()
@@ -1123,20 +1079,12 @@ def admin_edit_meals():
 @app.route("/admin/employees", methods=["GET"])
 def get_employees():
     name = request.args.get("name", "").strip()
-    # 기본은 재직자만. 퇴사자까지 보려면 ?include_resigned=1
-    include_resigned = request.args.get("include_resigned", "").strip() in ("1", "true", "Y")
-
-    where, params = [], []
-    if name:
-        where.append("name = ?"); params.append(name)
-    if not include_resigned:
-        where.append("IFNULL(status, '재직') = '재직'")
-    sql = "SELECT * FROM employees"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-
     conn = get_db_connection()
-    employees = conn.execute(sql, params).fetchall()
+    if name:
+        cursor = conn.execute("SELECT * FROM employees WHERE name = ?", (name,))
+    else:
+        cursor = conn.execute("SELECT * FROM employees")
+    employees = cursor.fetchall()
     conn.close()
     return jsonify([dict(emp) for emp in employees])
 
@@ -1189,24 +1137,11 @@ def update_employee(emp_id):
 
 @app.route("/admin/employees/<emp_id>", methods=["DELETE"])
 def delete_employee(emp_id):
-    """행을 지우지 않고 퇴사 처리한다.
-       삭제하면 meals JOIN employees 가 끊겨 그 사람이 먹은 식사가 정산에서 빠진다."""
-    resigned_at = (request.args.get("resigned_at") or "").strip() or now_kst_str()[:10]
     conn = get_db_connection()
-    conn.execute("UPDATE employees SET status = '퇴사', resigned_at = ? WHERE id = ?",
-                 (resigned_at, emp_id))
+    conn.execute("DELETE FROM employees WHERE id = ?", (emp_id,))
     conn.commit()
     conn.close()
-    return jsonify({"success": True, "status": "퇴사", "resigned_at": resigned_at})
-
-@app.route("/admin/employees/<emp_id>/restore", methods=["POST"])
-def restore_employee(emp_id):
-    """퇴사 처리 취소."""
-    conn = get_db_connection()
-    conn.execute("UPDATE employees SET status = '재직', resigned_at = NULL WHERE id = ?", (emp_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({"success": True, "status": "재직"})
+    return jsonify({"success": True})
 
 @app.route("/admin/employees/upload", methods=["POST"])
 def upload_employees():
@@ -1229,7 +1164,7 @@ def upload_employees():
                 ON CONFLICT(id) DO UPDATE SET name=excluded.name, dept=excluded.dept, type=excluded.type, region=excluded.region, rank=excluded.rank
             """, (row["id"], row["name"], row["dept"], row["rank"] if "rank" in row else "", row["type"], row["region"]))
         conn.commit()
-        cursor = conn.execute("SELECT * FROM employees WHERE IFNULL(status, '재직') = '재직'")
+        cursor = conn.execute("SELECT * FROM employees")
         employees = [dict(emp) for emp in cursor.fetchall()]
         conn.close()
         return jsonify(employees), 200
@@ -1253,7 +1188,7 @@ def login_check():
         return jsonify({"error": "사번과 이름을 모두 입력하세요"}), 400
 
     conn = get_db_connection()
-    cursor = conn.execute("SELECT id, name, dept, rank, type, level, region FROM employees WHERE id = ? AND name = ? AND IFNULL(status, '재직') = '재직'", (emp_id, name))
+    cursor = conn.execute("SELECT id, name, dept, rank, type, level, region FROM employees WHERE id = ? AND name = ?", (emp_id, name))
     user = cursor.fetchone()
     conn.close()
 
@@ -1563,69 +1498,39 @@ def download_dept_summary_excel():
 def weekly_dept_stats():
     start, end = request.args.get("start"), request.args.get("end")
     conn = get_db_connection()
-    # 표시 단위(깃발) 기준으로 부서를 묶는다. 부서명을 자르지 않는다.
-    emp_info = {r["id"]: r for r in conn.execute("""
-        SELECT e.id, e.name, e.type, e.region,
-               IFNULL(e.status, '재직')      AS status,
-               IFNULL(g.group_name, e.dept)  AS grp,
-               IFNULL(g.sort_order, 999999)  AS sort_order
-          FROM employees e
-          LEFT JOIN dept_group g ON g.dept_id = e.dept_id
-    """).fetchall()}
+    employees = conn.execute("SELECT id, name, dept, type, region FROM employees").fetchall()
+    dept_members = defaultdict(list)
+    for e in employees: dept_members[(e["dept"], e["type"], e["region"])].append(e["id"])
 
     dept_map = {}
-
-    def ensure(key, type_, sort_order, total=0):
-        if key not in dept_map:
-            dept_map[key] = {"type": type_, "dept": key, "display_dept": key,
-                             "total": total, "days": {}, "sort_order": sort_order}
-        return dept_map[key]
-
-    # 상시 노출 행 — 에코센터 직영 + 협력사. 정원은 재직자만 센다.
-    for info in emp_info.values():
-        if info["status"] != "재직":
-            continue
-        if info["type"] == "직영" and info["region"] != "에코센터":
-            continue
-        ensure(info["grp"], info["type"], info["sort_order"])["total"] += 1
-
-    meal_rows = conn.execute("SELECT m.user_id, m.date, m.breakfast, m.lunch, m.dinner FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", (start, end)).fetchall()
+    for (dept, type_, region), ids in dept_members.items():
+        if type_ == "직영" and region != "에코센터": continue
+        dept_map[dept] = {"type": type_, "dept": dept, "display_dept": dept, "total": len(ids), "days": {}}
+    
+    meal_rows = conn.execute("SELECT m.date, e.name, e.dept, e.type, e.region, m.breakfast, m.lunch, m.dinner FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", (start, end)).fetchall()
     for row in meal_rows:
-        info = emp_info.get(row["user_id"])
-        if info is None:
-            continue
-        if info["status"] != "재직":
-            # 퇴사자는 소속과 무관하게 한 줄로 묶는다.
-            grp, sort_order, type_ = RESIGNED_LABEL, 999998, info["type"]
-        else:
-            grp, sort_order, type_ = info["grp"], info["sort_order"], info["type"]
-            # 에코센터 외 근무자는 신청이 있을 때만 (출장) 행으로 나타난다.
-            if type_ == "직영" and info["region"] != "에코센터":
-                grp, sort_order = f"{grp}(출장)", sort_order + 1
-        ensure(grp, type_, sort_order, total=1)
+        date, name, dept, type_, region = row["date"], row["name"], row["dept"], row["type"], row["region"]
+        dept_key = f"{dept[:4]}(출장)" if type_ == "직영" and region != "에코센터" else dept
+        if dept_key not in dept_map:
+            dept_map[dept_key] = {"type": type_, "dept": dept_key, "display_dept": dept_key, "total": 1, "days": {}}
+        
         for meal, key in zip(["breakfast", "lunch", "dinner"], ["b", "l", "d"]):
             if row[meal] > 0:
-                dept_map[grp]["days"].setdefault(row["date"], {"b": [], "l": [], "d": []})[key].append(info["name"])
+                dept_map[dept_key]["days"].setdefault(date, {"b":[], "l":[], "d":[]})[key].append(name)
 
-    visitor_rows = conn.execute("SELECT v.applicant_id, v.applicant_name, v.date, v.breakfast, v.lunch, v.dinner, v.type FROM visitors v JOIN employees e ON v.applicant_id = e.id WHERE v.date BETWEEN ? AND ?", (start, end)).fetchall()
+    visitor_rows = conn.execute("SELECT v.date, v.breakfast, v.lunch, v.dinner, e.name, e.dept, v.type FROM visitors v JOIN employees e ON v.applicant_id = e.id WHERE v.date BETWEEN ? AND ?", (start, end)).fetchall()
     for row in visitor_rows:
-        info = emp_info.get(row["applicant_id"])
-        if info is None:
-            continue
-        vtype = row["type"]
-        grp, sort_order = info["grp"], info["sort_order"]
-        if info["status"] != "재직":
-            grp, sort_order = RESIGNED_LABEL, 999998
-        if vtype == "방문자":
-            grp, sort_order = f"{grp}(방문자)", sort_order + 2
-        ensure(grp, vtype, sort_order, total=1)
-        name = row["applicant_name"] or info["name"]
+        date, name, dept, vtype = row["date"], row["name"], row["dept"], row["type"]
+        dept_key = f"{dept[:2]}(방문자)" if vtype == "방문자" else dept
+        if dept_key not in dept_map:
+            dept_map[dept_key] = {"type": vtype, "dept": dept_key, "display_dept": dept_key, "total": 1, "days": {}}
+        
         for meal, key in zip(["breakfast", "lunch", "dinner"], ["b", "l", "d"]):
             if row[meal] > 0:
-                dept_map[grp]["days"].setdefault(row["date"], {"b": [], "l": [], "d": []})[key].append(f"{name}({row[meal]})")
+                dept_map[dept_key]["days"].setdefault(date, {"b":[], "l":[], "d":[]})[key].append(f"{name}({row[meal]})")
 
     conn.close()
-    return jsonify(sorted(dept_map.values(), key=lambda r: (r["sort_order"], r["dept"])))
+    return jsonify(list(dept_map.values()))
 
 @app.route("/admin/stats/weekly_dept/excel")
 def download_weekly_dept_excel():
@@ -1644,34 +1549,23 @@ def download_weekly_dept_excel():
 def download_pivot_excel():
     start, end = request.args.get("start"), request.args.get("end")
     conn = sqlite3.connect("db.sqlite")
-    # 부서 열에는 소속 노드의 정식 명칭을 그대로 쓴다 (예: 전력시스템팀(설계-부산)).
-    df_meals = pd.read_sql_query("""
-        SELECT m.date, m.breakfast, m.lunch, m.dinner, e.name,
-               IFNULL(d.dept_name, e.dept) AS dept,
-               e.type, e.region,
-               IFNULL(e.status, '재직')     AS status
-          FROM meals m
-          JOIN employees e ON m.user_id = e.id
-          LEFT JOIN department_tree d ON d.id = e.dept_id
-         WHERE m.date BETWEEN ? AND ?
-    """, conn, params=(start, end))
+    df_meals = pd.read_sql_query("SELECT m.date, m.breakfast, m.lunch, m.dinner, e.name, e.dept, e.type, e.region FROM meals m JOIN employees e ON m.user_id = e.id WHERE m.date BETWEEN ? AND ?", conn, params=(start, end))
     df_visitors = pd.read_sql_query("SELECT v.applicant_name, v.date, v.breakfast, v.lunch, v.dinner, v.type, e.dept, e.type as emp_type FROM visitors v LEFT JOIN employees e ON v.applicant_id = e.id WHERE v.date BETWEEN ? AND ?", conn, params=(start, end))
     conn.close()
 
     eco_center, tech_center = [], []
     for _, row in df_meals.iterrows():
         if row.get("type") != "직영": continue
-        base = [row["date"], row["name"], row["dept"], row.get("status", "재직")]
+        base = [row["date"], row["name"], row["dept"]]
         target = eco_center if row.get("region") == "에코센터" else tech_center
         if int(row.get("breakfast", 0)) == 1: target.append(base + ["조식"])
         if int(row.get("lunch", 0)) == 1: target.append(base + ["중식"])
         if int(row.get("dinner", 0)) == 1: target.append(base + ["석식"])
 
-    cols = ["식사일자", "이름", "부서", "재직상태", "식사 구분"]
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        pd.DataFrame(eco_center, columns=cols).to_excel(writer, index=False, sheet_name="직영_에코센터")
-        pd.DataFrame(tech_center, columns=cols).to_excel(writer, index=False, sheet_name="직영_출장")
+        pd.DataFrame(eco_center, columns=["식사일자", "이름", "부서", "식사 구분"]).to_excel(writer, index=False, sheet_name="직영_에코센터")
+        pd.DataFrame(tech_center, columns=["식사일자", "이름", "부서", "식사 구분"]).to_excel(writer, index=False, sheet_name="직영_출장")
     output.seek(0)
     return send_file(output, as_attachment=True, download_name="pivot_meals.xlsx")
 
